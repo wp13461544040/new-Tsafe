@@ -61,9 +61,35 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 
 # 数据库配置
+#
+# 🔴 `DATABASE_URL` 必须可覆盖，原因有两个（后者是被真实事故推出来的）：
+#   1. 部署：Docker 想把库挂到别的卷、或换成 PostgreSQL 时不用改代码。
+#   2. **测试隔离**：路径写死时，任何 `create_app()` 都连到这个唯一的真实库。
+#      2026-09-22 就因此出过事故 —— 一个本想跑在临时库上的验证脚本里有
+#      `Account.query.delete()`，实际删的是开发库里的 accounts 表
+#      （当时库里只有测试残留，没造成业务损失，但纯属运气）。
+#      写死路径让"跑个测试"和"动生产数据"变成同一个操作，这是设计问题，
+#      不是使用者不小心。
 DATABASE_PATH = BASE_DIR / "backend" / "data" / "admin.db"
-SQLALCHEMY_DATABASE_URI = f"sqlite:///{DATABASE_PATH}"
+SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", "") or f"sqlite:///{DATABASE_PATH}"
 SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+
+def sqlite_dir() -> Path | None:
+    """当前 URI 若是 SQLite，返回需要预先创建的目录；否则 None。
+
+    启动时要 mkdir 的是**实际在用的**那个目录，不能固定用 `DATABASE_PATH.parent`：
+    设了 `DATABASE_URL=sqlite:////var/lib/app/x.db` 时，前者会去建一个没人用的
+    `backend/data/`，而真正需要的 `/var/lib/app/` 没建 ⇒ 启动报 "unable to open
+    database file"，且错误信息完全不指向根因。
+    """
+    uri = SQLALCHEMY_DATABASE_URI
+    if not uri.startswith("sqlite:"):
+        return None  # PostgreSQL/MySQL 等无本地目录可建
+    path = uri.split("///", 1)[-1] if "///" in uri else ""
+    if not path or path == ":memory:":
+        return None
+    return Path(path).expanduser().resolve().parent
 
 # JWT 配置 - 使用相同的密钥
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", SECRET_KEY)

@@ -131,8 +131,12 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(config)
     
-    # 确保必要的目录存在
-    config.DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # 确保必要的目录存在。
+    # 用 config.sqlite_dir() 而不是 DATABASE_PATH.parent —— 后者在设了
+    # DATABASE_URL 时会建错目录（详见 config.sqlite_dir 的注释）。
+    db_dir = config.sqlite_dir()
+    if db_dir is not None:
+        db_dir.mkdir(parents=True, exist_ok=True)
     config.UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
     
     # 初始化扩展
