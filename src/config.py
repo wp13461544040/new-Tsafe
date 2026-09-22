@@ -1,7 +1,14 @@
 """集中配置。
 
-凭据一律从环境变量读取，默认值留空 —— 避免 `os.getenv(k, "真实值")` 这种泄漏点。
-用 .env 加载（stdlib 实现，不引 python-dotenv）。
+配置分三类，各有归属，**不用 .env 文件**（2026-09-22 起）：
+
+  1. 不常改的公开值（目标站点地址、UA、路径约定）→ 本文件内置写死
+  2. 凭据（邮箱服务的 key）→ Web 管理端「邮箱配置」页，存数据库
+  3. 可覆盖项 → 环境变量（Docker `-e` 注入），优先级高于内置默认值
+
+为什么去掉 .env：它既要当"凭据仓库"又要当"配置说明"，结果是每次部署都要
+先照着模板填一遍，而大部分项其实永远不变。凭据已经进了数据库（页面可改、
+可测连通性），剩下的写死就够了。
 """
 
 from __future__ import annotations
@@ -11,39 +18,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-
-def _load_dotenv(path: Path) -> None:
-    """极简 .env 加载器：真实环境变量优先级更高。"""
-    if not path.is_file():
-        return
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        k, v = k.strip(), v.strip().strip('"').strip("'")
-        if k and k not in os.environ:
-            os.environ[k] = v
-
-
-_load_dotenv(ROOT / ".env")
-
 # ── CF Temp Email Worker ────────────────────────────────────────────────
-# 🔴 三个都**不留真实默认值**。以前 `TEMPMAIL_BASE` 的默认值是真实的
-#    `https://temp-email-worker.<子域>.workers.dev`、`TEMPMAIL_DOMAIN` 是真实域名，
-#    于是"基础设施标识"被写进了仓库（Worker 子域 + 自有邮箱域名）。
-#    这类东西单独看不是凭据，但合起来足以被针对性打击，且一旦公开就永久公开。
-#    现在一律走 .env，缺失由 `validate()` 显式报出来（不是静默用默认值连上去）。
+# 🔴 **不留真实默认值**：Worker 子域 + 自有邮箱域名合起来足以被针对性打击，
+#    且一旦进仓库就永久公开。
+#
+# 这三项属于"凭据类"⇒ 归 Web 管理端「邮箱配置」页（选 CF Worker 后端时填）。
+# 这里留空只是给命令行入口一个可选的环境变量通路。
 TEMPMAIL_BASE = os.getenv("TEMPMAIL_BASE", "")
 TEMPMAIL_ADMIN_KEY = os.getenv("TEMPMAIL_ADMIN_KEY", "")
 TEMPMAIL_DOMAIN = os.getenv("TEMPMAIL_DOMAIN", "")
-
-# ── Cloudflare API（只有 tools/probes/* 诊断脚本用得到）──────────────────
-# 同理：账号 id / D1 库 id / API Token 一个都不进仓库。
-# `tools/probes/probe_worker_health.py` 与 `probe_email_routing.py` 会读这三个。
-CF_API_TOKEN = os.getenv("CF_API_TOKEN", "")
-CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "")
-CF_D1_ID = os.getenv("CF_D1_ID", "")
 
 # ── Remail 邮箱接口聚合（remail.aishop6.com）─────────────────────────────
 # 与上面的 CF Worker **并列的第二个邮箱后端**：一个 API 切换多种邮箱
@@ -99,24 +82,31 @@ MOEMAIL_DOMAIN = os.getenv("MOEMAIL_DOMAIN", "")
 MOEMAIL_EXPIRY_MS = int(os.getenv("MOEMAIL_EXPIRY_MS", "86400000"))
 
 # ── 目标站点 ────────────────────────────────────────────────────────────
-# 🔴 不留真实默认值 —— 同 `TEMPMAIL_BASE` 的理由：站点标识写进仓库等于公开
-#    "这个工具在对谁做批量注册"。这类信息单独看不是凭据，但一旦公开就永久公开。
+# 内置默认值 = 开箱可用。这些是**站点自己的公开地址**，不是凭据，
+# 而且极少变（站点换域名才需要改）⇒ 写死比让每个人配一遍更合理。
 #
-# 两个来源，**数据库优先**：
-#   · Web 管理端 → 「系统设置」页写入数据库，跑批前由 `executor` 调
-#     `apply_site_config()` 注入（页面改完立即生效，不用重启）
-#   · 命令行入口 → 读 .env（`tools/run_e2e.py` 这类没有数据库的场景）
-SITE_ORIGIN = os.getenv("SITE_ORIGIN", "").rstrip("/")
+# 三级覆盖，后者优先：
+#   1. 这里的内置默认值
+#   2. 环境变量（Docker 部署时 `-e SITE_ORIGIN=...` 可覆盖，不需要 .env 文件）
+#   3. 数据库 —— 「系统设置 → 站点配置」页写的值，`apply_site_config()` 注入
+#
+# ⚠️ 站点若改了域名，优先在页面上改（立即生效），别改这里再重启。
+_DEFAULT_SITE_ORIGIN = "https://console.typesafe.ai"
+_DEFAULT_STYTCH_HOST = "https://login.typesafe.ai"
+_DEFAULT_SENDER_DOMAIN = "typesafe.ai"
+_DEFAULT_VERIFY_API = "https://api.typesafe.ai/v1/systemone"
+
+SITE_ORIGIN = os.getenv("SITE_ORIGIN", _DEFAULT_SITE_ORIGIN).rstrip("/")
 SITE_LOGIN = f"{SITE_ORIGIN}/login" if SITE_ORIGIN else ""
-STYTCH_LOGIN_HOST = os.getenv("STYTCH_LOGIN_HOST", "").rstrip("/")
+STYTCH_LOGIN_HOST = os.getenv("STYTCH_LOGIN_HOST", _DEFAULT_STYTCH_HOST).rstrip("/")
 #: 邮件发件人域（用于 `mailrules` 匹配验证邮件）。
-SENDER_DOMAIN = os.getenv("SENDER_DOMAIN", "")
+SENDER_DOMAIN = os.getenv("SENDER_DOMAIN", _DEFAULT_SENDER_DOMAIN)
 
 #: 站点配置的字段名清单 —— 新增字段只改这里，API 与前端都从它派生。
 SITE_CONFIG_KEYS = ("SITE_ORIGIN", "STYTCH_LOGIN_HOST", "SENDER_DOMAIN", "VERIFY_API_URL")
 
 #: key 验收端点（`tools/verify_keys.py` 用）。同样可被页面覆盖。
-VERIFY_API_URL = os.getenv("VERIFY_API_URL", "")
+VERIFY_API_URL = os.getenv("VERIFY_API_URL", _DEFAULT_VERIFY_API)
 
 
 def apply_site_config(**values: str) -> dict[str, str]:
@@ -251,17 +241,15 @@ def validate(*, need_tempmail: bool = True) -> list[str]:
 
 
 def validate_site() -> list[str]:
-    """目标站点三项。所有跑批路径都需要，与选哪个邮箱后端无关。"""
+    """目标站点三项。
+
+    有内置默认值，正常情况下不会缺 —— 保留这个检查是为了兜住"页面上把值
+    清成空串再存进数据库"这类情况（`apply_site_config` 会跳过空值，
+    但直接改库绕过它是可能的）。
+    """
     return [k for k, v in (("SITE_ORIGIN", SITE_ORIGIN),
                            ("STYTCH_LOGIN_HOST", STYTCH_LOGIN_HOST),
                            ("SENDER_DOMAIN", SENDER_DOMAIN)) if not v]
-
-
-def validate_cf() -> list[str]:
-    """Cloudflare API 三项。只有诊断探针需要，主流程不需要 —— 所以单独一个函数。"""
-    return [k for k, v in (("CF_API_TOKEN", CF_API_TOKEN),
-                           ("CF_ACCOUNT_ID", CF_ACCOUNT_ID),
-                           ("CF_D1_ID", CF_D1_ID)) if not v]
 
 
 def validate_remail() -> list[str]:

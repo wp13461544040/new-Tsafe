@@ -208,8 +208,8 @@ if __name__ == "__main__":
     app = create_app()
 
     if config.SECRET_KEY_IS_EPHEMERAL:
-        print("[WARN] 未配置 API_SECRET_KEY，本次使用临时随机密钥 ——")
-        print("    重启后所有登录态失效。生产环境请在 .env 里固定它。")
+        print("[WARN] 密钥无法落盘（目录不可写），本次使用内存密钥 ——")
+        print(f"    重启后所有登录态会失效。检查 {config.SECRET_KEY_FILE.parent} 是否可写。")
 
     print("后端 API 启动中...")
     print("访问地址: http://127.0.0.1:5000")

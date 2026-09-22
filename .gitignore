@@ -80,3 +80,9 @@ frontend/dist/
 
 # 图片
 *.png
+
+# 🔴 JWT 签名密钥（自动生成并落盘，跨重启稳定）。
+# 提交进仓库等于任何人都能伪造 token —— 必须排除。
+# 显式列目录：上面的 `*.key` 类通配没有覆盖以点开头的文件名。
+backend/data/.secret_key
+backend/data/

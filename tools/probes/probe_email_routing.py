@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -31,38 +32,46 @@ from _bootstrap import ROOT  # noqa: E402,F401
 
 from src import config  # noqa: E402
 
-# 🔴 凭据与基础设施标识一律走 .env（理由见 src/config.py）。
+# 🔴 凭据**只从命令行/环境变量取**，代码里不留默认值。
 # 这里以前把账号 id 与一个**活令牌**当默认值写死在代码里。
-ACCOUNT_ID = config.CF_ACCOUNT_ID
-TOKEN = config.CF_API_TOKEN
-BASE = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}"
+# 真正的值由 `main()` 从命令行参数覆盖。
+ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "")
+TOKEN = os.getenv("CF_API_TOKEN", "")
+#: 探针自己的域名清单（`--domain` 可传多次）。空则问 Worker 的 /health。
+DOMAINS: list[str] = []
 
 SCRIPT = "temp-email-worker"
 
 
-def domains() -> list[str]:
+#: ⚠️ 运行时拼，不要做成模块级常量 —— `ACCOUNT_ID` 会被命令行参数覆盖。
+def _base() -> str:
+    return f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}"
+
+
+def domains(worker_base: str = "") -> list[str]:
     """要查的域名列表。
 
-    优先 `TEMPMAIL_DOMAINS`（逗号分隔）；没配就问 Worker 自己的 `/health`
-    —— 它返回的 `domains` 就是权威列表。这样仓库里不必出现自有域名。
+    优先命令行传的 `--domain`；没传就问 Worker 自己的 `/health`
+    —— 它返回的 `domains` 就是权威列表，不必在任何地方维护一份副本。
     """
-    env = [d.strip() for d in os.getenv("TEMPMAIL_DOMAINS", "").split(",") if d.strip()]
-    if env:
-        return env
-    if not config.TEMPMAIL_BASE:
+    if DOMAINS:
+        return DOMAINS
+
+    base = (worker_base or config.TEMPMAIL_BASE or "").rstrip("/")
+    if not base:
         return []
     try:
-        req = urllib.request.Request(f"{config.TEMPMAIL_BASE.rstrip('/')}/health")
+        req = urllib.request.Request(f"{base}/health")
         req.add_header("User-Agent", config.UA)
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode()).get("domains") or []
     except Exception as exc:  # noqa: BLE001
-        print(f"  ⚠ 取域名列表失败（{exc}）—— 请在 .env 里设 TEMPMAIL_DOMAINS")
+        print(f"  ⚠ 取域名列表失败（{exc}）—— 用 --domain 显式指定")
         return []
 
 
 def api(path: str) -> dict:
-    req = urllib.request.Request(BASE + path)
+    req = urllib.request.Request(_base() + path)
     req.add_header("Authorization", f"Bearer {TOKEN}")
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -91,16 +100,33 @@ def show(label: str, path: str, keys: list[str] | None = None) -> dict:
 
 
 def main() -> int:
-    missing = config.validate_cf()
-    if missing:
-        print("✗ 缺少 Cloudflare 配置：" + ", ".join(missing))
-        print("  这三个只在 .env 里配，代码里刻意不留默认值（见 src/config.py 的说明）。")
+    global ACCOUNT_ID, TOKEN, DOMAINS
+
+    ap = argparse.ArgumentParser(
+        description="Cloudflare Email Routing 收信链路诊断（只读）",
+        epilog="凭据只在命令行传，不落任何文件 —— 探针是一次性工具。",
+    )
+    ap.add_argument("--token", default=TOKEN, help="Cloudflare API Token（需 Zone:Read）")
+    ap.add_argument("--account-id", default=ACCOUNT_ID, help="账号 id")
+    ap.add_argument("--domain", action="append", default=[],
+                    help="要查的域名，可传多次。不传则问 Worker 的 /health")
+    ap.add_argument("--worker-base", default="",
+                    help="Worker 根地址，用于自动取域名列表")
+    args = ap.parse_args()
+
+    TOKEN, ACCOUNT_ID = args.token, args.account_id
+    DOMAINS = args.domain
+
+    if missing := [n for n, v in (("--token", TOKEN), ("--account-id", ACCOUNT_ID)) if not v]:
+        print("✗ 缺少参数：" + ", ".join(missing))
+        print("  用法：python tools/probes/probe_email_routing.py \\")
+        print("          --token <API_TOKEN> --account-id <ACCOUNT_ID> [--domain a.com]")
         return 1
 
-    doms = domains()
+    doms = domains(args.worker_base)
     if not doms:
-        print("✗ 拿不到域名列表：请在 .env 里设 TEMPMAIL_DOMAINS（逗号分隔），"
-              "或配好 TEMPMAIL_BASE 让 Worker 的 /health 自报。")
+        print("✗ 拿不到域名列表：用 --domain 显式指定，"
+              "或 --worker-base 指向 Worker 让它的 /health 自报。")
         return 1
 
     print("=" * 74)

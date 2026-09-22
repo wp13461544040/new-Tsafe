@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -29,22 +30,25 @@ from _bootstrap import ROOT  # noqa: E402,F401
 
 from src import config  # noqa: E402
 
-# 🔴 凭据与基础设施标识**一律走 .env**，代码里不留默认值。
+# 🔴 凭据**只从命令行/环境变量取**，代码里不留默认值。
 # 2026-09-20 之前这里是 `os.environ.get("CF_API_TOKEN", "cfat_…真实令牌…")` ——
 # 等于把一个有 Workers/D1 读权限的活令牌提交进了仓库。
-# `config` 会在 import 时加载 `.env`，所以下面直接读它即可。
-TOKEN = config.CF_API_TOKEN
-ACCOUNT_ID = config.CF_ACCOUNT_ID
-D1_ID = config.CF_D1_ID
+# 默认值来自环境变量（可为空），真正的值由 `main()` 从命令行参数覆盖。
+TOKEN = os.getenv("CF_API_TOKEN", "")
+ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "")
+D1_ID = os.getenv("CF_D1_ID", "")
 
 # Worker 名字不是凭据，留在代码里没问题。
 SCRIPT = "temp-email-worker"
 
-BASE = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}"
+#: ⚠️ 不要在模块级拼成常量 —— `ACCOUNT_ID` 由 `main()` 从命令行参数覆盖，
+#:    import 时求值的话命令行传的账号 id 会被静默忽略（同 mailrules 踩过的坑）。
+def _base() -> str:
+    return f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}"
 
 
 def api(path: str, *, method: str = "GET", body: dict | None = None) -> dict:
-    url = BASE + path
+    url = _base() + path
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {TOKEN}")
@@ -62,11 +66,27 @@ def d1_query(sql: str) -> dict:
 
 
 def main() -> int:
-    missing = config.validate_cf()
-    if missing:
-        print("✗ 缺少 Cloudflare 配置：" + ", ".join(missing))
-        print("  这三个只在 .env 里配，代码里刻意不留默认值（见 src/config.py 的说明）。")
-        print("  .env 模板见 .env.example。")
+    global TOKEN, ACCOUNT_ID, D1_ID
+
+    ap = argparse.ArgumentParser(
+        description="Cloudflare Worker / D1 健康诊断（只读）",
+        epilog="凭据只在命令行传，不落任何文件 —— 探针是一次性工具，"
+               "没必要为它维护一份配置。",
+    )
+    ap.add_argument("--token", default=TOKEN,
+                    help="Cloudflare API Token（需 Workers Scripts:Read + D1:Read）")
+    ap.add_argument("--account-id", default=ACCOUNT_ID, help="账号 id（32 位十六进制）")
+    ap.add_argument("--d1-id", default=D1_ID, help="D1 数据库 id")
+    args = ap.parse_args()
+
+    TOKEN, ACCOUNT_ID, D1_ID = args.token, args.account_id, args.d1_id
+
+    if missing := [n for n, v in (("--token", TOKEN), ("--account-id", ACCOUNT_ID),
+                                  ("--d1-id", D1_ID)) if not v]:
+        print("✗ 缺少参数：" + ", ".join(missing))
+        print("  用法：python tools/probes/probe_worker_health.py \\")
+        print("          --token <API_TOKEN> --account-id <ACCOUNT_ID> --d1-id <D1_ID>")
+        print("  （也可用同名环境变量 CF_API_TOKEN / CF_ACCOUNT_ID / CF_D1_ID）")
         return 1
 
     print("=" * 74)
