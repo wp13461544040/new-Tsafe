@@ -1,4 +1,5 @@
 ﻿"""Flask API 主文件"""
+import os
 import secrets
 import sys
 from pathlib import Path
@@ -258,6 +259,18 @@ def create_app():
     n = recover_stale_tasks(app)
     if n:
         print(f"[WARN] 已将 {n} 个残留的 running 任务标记为 failed（服务重启导致中断）")
+
+    # 账号池定时巡检。默认关闭，由「系统设置 → 账号巡检」里的开关控制；
+    # 调度线程常驻并每分钟读一次配置，所以开关改完不用重启。
+    #
+    # 🔴 Flask 的 debug reloader 会起**两个**进程（父进程只负责监视文件变化），
+    #    两边都启调度器就会让同一批账号被检查两次 ⇒ fail_streak 双倍累加，
+    #    阈值 2 的配置实际变成阈值 1。只在真正的工作进程里启。
+    #    （gunicorn 是 -w 1 单 worker，没这个问题。）
+    if not config.DEBUG or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        from backend.checker import start_scheduler
+        if start_scheduler(app):
+            print("[OK] 账号巡检调度器已启动（是否执行取决于页面上的开关）")
     
     return app
 

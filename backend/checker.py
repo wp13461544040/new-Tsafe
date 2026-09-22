@@ -45,6 +45,106 @@ UNKNOWN_ABORT_STREAK = 20
 #: 太大则取消响应慢、SQLite 锁持有时间长。
 COMMIT_BATCH = 50
 
+#: 配置在 SystemConfig 里的键前缀。
+CONFIG_PREFIX = "check."
+
+#: 配置项定义：键 → (默认值, 类型, 说明)。
+#: 前端表单、API 校验、调度器读取都从这里派生 —— 加配置项只改这一处。
+CONFIG_SCHEMA: dict[str, tuple] = {
+    # 🔴 默认**关闭**：巡检会对验收端点发真实请求，几千个账号就是几千次调用。
+    #    默认开启等于用户什么都没做就开始消耗配额，必须让他显式打开。
+    "enabled": (False, bool, "是否启用定时巡检"),
+    "interval_hours": (6.0, float, "每隔多少小时跑一轮"),
+    "limit": (200, int, "单轮最多检查多少个账号"),
+    "concurrency": (5, int, "并发探测数"),
+    "dead_threshold": (2, int, "连续几次判定失效才标记为 invalid"),
+    "include_assigned": (False, bool, "是否也检查已被卡密提取的账号"),
+    "timeout": (30.0, float, "单次探测超时（秒）"),
+    # 跳过最近这么多小时内检查过的。默认 0 = 跟随 interval_hours
+    # （避免"间隔 6 小时但每轮都把同一批又检查一遍"）。
+    "min_interval_hours": (0.0, float, "跳过最近N小时内已检查的，0=跟随巡检间隔"),
+}
+
+#: 调度器轮询间隔（秒）。
+#: 🔴 不直接 `wait(interval_hours * 3600)`：那样用户把间隔从 24 小时改成 1 小时，
+#:    得等满 24 小时才生效。改为每分钟醒一次重算，配置变更最迟 60 秒生效。
+SCHED_TICK = 60.0
+
+#: 上次巡检**完成**时间存在 SystemConfig 里（不是内存）。
+#: 🔴 存盘的理由：进程重启后如果从内存的"从未跑过"开始算，就会立刻触发一轮 ——
+#:    频繁重启（改配置、更新镜像）会变成反复打验收端点。
+LAST_RUN_KEY = CONFIG_PREFIX + "last_run_at"
+
+_sched_thread: threading.Thread | None = None
+_sched_stop: threading.Event | None = None
+
+
+def load_config() -> dict:
+    """从 SystemConfig 读巡检配置，缺失项用默认值补齐。"""
+    from backend.models import SystemConfig
+
+    out = {}
+    for key, (default, typ, _desc) in CONFIG_SCHEMA.items():
+        raw = SystemConfig.get_value(CONFIG_PREFIX + key, None)
+        if raw is None or raw == "":
+            out[key] = default
+            continue
+        try:
+            if typ is bool:
+                out[key] = str(raw).strip().lower() in ("1", "true", "yes", "on")
+            else:
+                out[key] = typ(raw)
+        except (TypeError, ValueError):
+            # 脏数据不该让调度器崩 —— 退回默认值继续跑
+            out[key] = default
+    return out
+
+
+def save_config(values: dict) -> dict:
+    """写巡检配置。只接受 schema 里的键，返回落库后的完整配置。"""
+    from backend.models import SystemConfig
+
+    for key, (_default, typ, desc) in CONFIG_SCHEMA.items():
+        if key not in values:
+            continue
+        v = values[key]
+        if typ is bool:
+            v = "1" if (v is True or str(v).strip().lower() in ("1", "true", "yes", "on")) else "0"
+        else:
+            v = str(typ(v))
+        SystemConfig.set_value(CONFIG_PREFIX + key, v, desc)
+
+    return load_config()
+
+
+def _get_last_run() -> datetime | None:
+    from backend.models import SystemConfig
+
+    raw = SystemConfig.get_value(LAST_RUN_KEY, "")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _set_last_run(when: datetime) -> None:
+    from backend.models import SystemConfig
+
+    SystemConfig.set_value(LAST_RUN_KEY, when.isoformat(), "上次巡检完成时间")
+
+
+def next_run_at(cfg: dict | None = None) -> datetime | None:
+    """下次预计巡检时间。未启用时返回 None。"""
+    cfg = cfg or load_config()
+    if not cfg["enabled"]:
+        return None
+    last = _get_last_run()
+    if last is None:
+        return datetime.utcnow()
+    return last + timedelta(hours=max(0.1, cfg["interval_hours"]))
+
 
 def is_checking() -> bool:
     with _lock:
@@ -270,3 +370,112 @@ def start_check(app, **kwargs) -> bool:
         name="account-check", daemon=True,
     ).start()
     return True
+
+
+# ── 定时调度 ──────────────────────────────────────────────────────────
+def _scheduler_loop(app, stop: threading.Event) -> None:
+    """调度主循环。
+
+    每 `SCHED_TICK` 秒醒一次，做三件事：读配置、判断是否该跑、跑。
+    这样配置改动最迟 60 秒生效，不需要重启服务。
+    """
+    # 启动后先等一个 tick：给应用初始化留时间，也避免"容器刚起来就打端点"。
+    if stop.wait(SCHED_TICK):
+        return
+
+    while not stop.is_set():
+        try:
+            with app.app_context():
+                cfg = load_config()
+
+                if not cfg["enabled"]:
+                    # 未启用时仍然保持线程存活并轮询 —— 用户在页面上打开开关后
+                    # 最迟 60 秒就会生效，不需要重启服务。
+                    stop.wait(SCHED_TICK)
+                    continue
+
+                last = _get_last_run()
+                interval = max(0.1, cfg["interval_hours"])
+                due = last is None or (datetime.utcnow() - last) >= timedelta(hours=interval)
+
+                if not due:
+                    stop.wait(SCHED_TICK)
+                    continue
+
+                if is_checking():
+                    # 手动巡检正在跑 ⇒ 这轮跳过，等下一个 tick。
+                    # 不排队等待：巡检本身可能跑很久，攒着只会让后面连着跑好几轮。
+                    stop.wait(SCHED_TICK)
+                    continue
+
+                # min_interval 缺省跟随巡检间隔：避免每轮都把同一批账号又检查一遍
+                min_gap = cfg["min_interval_hours"] or interval
+
+                stats = run_check(
+                    app,
+                    limit=cfg["limit"],
+                    concurrency=cfg["concurrency"],
+                    dead_threshold=cfg["dead_threshold"],
+                    include_assigned=cfg["include_assigned"],
+                    min_interval_hours=min_gap,
+                    timeout=cfg["timeout"],
+                    triggered_by="schedule",
+                )
+
+                # 🔴 无论成功与否都记完成时间：失败了也别马上重试，
+                #    否则端点挂着时会每分钟打一次。
+                with app.app_context():
+                    _set_last_run(datetime.utcnow())
+
+                if stats.get("checked"):
+                    app.logger.info(
+                        "定时巡检完成：检查 %s，可用 %s，失效 %s，未知 %s，新标失效 %s",
+                        stats["checked"], stats["alive"], stats["dead"],
+                        stats["unknown"], stats["newly_invalid"])
+
+        except Exception:  # noqa: BLE001
+            # 调度线程**绝不能**因为一次异常退出 —— 那样定时巡检会静默停止，
+            # 而页面上开关还是"已启用"，没人会发现。
+            try:
+                app.logger.exception("巡检调度异常（已忽略，继续下一轮）")
+            except Exception:  # noqa: BLE001
+                pass
+            stop.wait(SCHED_TICK)
+
+
+def start_scheduler(app) -> bool:
+    """启动定时巡检调度线程。返回是否新启动了线程。
+
+    幂等：重复调用不会起第二个线程（两个调度器会让同一批账号被检查两次）。
+    """
+    global _sched_thread, _sched_stop
+
+    with _lock:
+        if _sched_thread is not None and _sched_thread.is_alive():
+            return False
+
+        _sched_stop = threading.Event()
+        _sched_thread = threading.Thread(
+            target=_scheduler_loop, args=(app, _sched_stop),
+            name="account-check-scheduler", daemon=True,
+        )
+        _sched_thread.start()
+        return True
+
+
+def stop_scheduler() -> None:
+    """停调度线程（测试用；生产靠 daemon=True 随进程退出）。"""
+    global _sched_thread, _sched_stop
+
+    with _lock:
+        if _sched_stop is not None:
+            _sched_stop.set()
+        thread, _sched_thread, _sched_stop = _sched_thread, None, None
+
+    if thread is not None:
+        thread.join(timeout=5)
+
+
+def scheduler_alive() -> bool:
+    with _lock:
+        return _sched_thread is not None and _sched_thread.is_alive()
