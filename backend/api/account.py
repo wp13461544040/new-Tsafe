@@ -183,6 +183,7 @@ def list_accounts():
     status = request.args.get("status")
     batch_id = request.args.get("batch_id")
     keyword = request.args.get("keyword")
+    check_status = request.args.get("check_status")
 
     query = Account.query
 
@@ -192,6 +193,13 @@ def list_accounts():
         query = query.filter_by(batch_id=batch_id)
     if keyword:
         query = query.filter(Account.email.like(f"%{keyword}%"))
+    if check_status:
+        # never = 从未巡检过。用独立取值而不是让前端传空串 ——
+        # 空串在 query string 里和"没传这个参数"无法区分。
+        if check_status == "never":
+            query = query.filter(Account.check_status.is_(None))
+        else:
+            query = query.filter_by(check_status=check_status)
 
     pagination = query.order_by(Account.created_at.desc()).paginate(
         page=page, per_page=page_size, error_out=False
@@ -210,12 +218,20 @@ def list_accounts():
 @bp.route("/stats", methods=["GET"])
 @jwt_required()
 def account_stats():
-    """账号池库存统计"""
+    """账号池库存统计（含巡检维度）"""
     return jsonify({
         "total": Account.query.count(),
         "available": Account.query.filter_by(status="available").count(),
         "assigned": Account.query.filter_by(status="assigned").count(),
         "invalid": Account.query.filter_by(status="invalid").count(),
+        # 巡检维度。与上面的 status 是两件事：status 是分配状态，
+        # check_* 是探测结论 —— 一个 assigned 的账号也可能已经 dead。
+        "check": {
+            "alive": Account.query.filter_by(check_status="alive").count(),
+            "dead": Account.query.filter_by(check_status="dead").count(),
+            "unknown": Account.query.filter_by(check_status="unknown").count(),
+            "never": Account.query.filter(Account.check_status.is_(None)).count(),
+        },
     })
 
 
@@ -513,3 +529,221 @@ def list_batches():
         Account.batch_id.isnot(None)
     ).distinct().all()
     return jsonify([b[0] for b in batches])
+
+
+# ---------------------------------------------------------------------------
+# 账号巡检（验活）
+#
+# 巡检会修改账号的 status，属于写操作 ⇒ 全部要求管理员。
+# 只读的 status/config 也要求管理员：配置里含探测端点相关参数，
+# 非管理员看到没有意义，而且会暴露内部巡检节奏。
+# ---------------------------------------------------------------------------
+
+
+def _check_admin_or_403():
+    """统一的管理员校验。返回 None 表示通过，否则返回要直接 return 的响应。"""
+    if not check_admin():
+        return jsonify({"error": "需要管理员权限"}), 403
+    return None
+
+
+@bp.route("/check", methods=["POST"])
+@jwt_required()
+def trigger_check():
+    """手动触发一轮巡检（异步）。
+
+    body 里的参数**覆盖**页面配置，只对这一轮生效（不落库）——
+    用于"我现在想用更大并发扫一遍"这种临时需求，不该改掉定时任务的设置。
+    """
+    from flask import current_app
+    from backend import checker
+
+    denied = _check_admin_or_403()
+    if denied:
+        return denied
+
+    cfg = checker.load_config()
+    data = request.get_json(silent=True) or {}
+
+    # 只接受这几项覆盖。enabled / interval_hours 是定时任务的事，
+    # 手动触发时传进来没有意义，静默忽略比报错更合适。
+    overridable = ("limit", "concurrency", "dead_threshold",
+                   "include_assigned", "timeout", "min_interval_hours", "mode")
+    kwargs = {}
+    for key in overridable:
+        kwargs[key] = cfg[key]
+        if key in data:
+            default, typ, _desc = checker.CONFIG_SCHEMA[key]
+            try:
+                if typ is bool:
+                    kwargs[key] = (data[key] is True or
+                                   str(data[key]).strip().lower() in ("1", "true", "yes", "on"))
+                else:
+                    kwargs[key] = typ(data[key])
+            except (TypeError, ValueError):
+                return jsonify({"error": f"参数 {key} 格式不对"}), 400
+
+            choices = checker.ENUM_CHOICES.get(key)
+            if choices and kwargs[key] not in choices:
+                return jsonify({
+                    "error": f"{key} 只能是 {' / '.join(choices)}"
+                }), 400
+
+    # 手动触发时默认**不跳过**刚检查过的：用户点按钮就是想立刻看结果，
+    # 沿用定时任务的 min_interval 会出现"点了没反应"（目标全被过滤掉）。
+    if "min_interval_hours" not in data:
+        kwargs["min_interval_hours"] = 0.0
+
+    if kwargs["limit"] < 1 or kwargs["concurrency"] < 1:
+        return jsonify({"error": "limit 与 concurrency 至少为 1"}), 400
+
+    # 🔴 必须传真实 app 对象。current_app 是绑定在当前请求上的代理，
+    #    后台线程里访问它会抛 "Working outside of application context"。
+    app = current_app._get_current_object()
+
+    started = checker.start_check(
+        app,
+        triggered_by="manual",
+        user_id=get_current_user_id(),
+        **kwargs,
+    )
+
+    if not started:
+        return jsonify({
+            "started": False,
+            "error": "已有一轮巡检在跑，等它结束或先中止",
+            "status": checker.last_stats(),
+        }), 409
+
+    return jsonify({
+        "started": True,
+        "message": "巡检已在后台开始，用 /check/status 查进度",
+        "params": kwargs,
+    })
+
+
+@bp.route("/check/stop", methods=["POST"])
+@jwt_required()
+def stop_check():
+    """请求中止当前巡检。
+
+    是"打标记"而不是"立即杀线程"：已经派出去的探测请求会跑完，
+    否则连接被硬断时那些账号会拿到 unknown，白跑一遍。
+    """
+    from backend import checker
+
+    denied = _check_admin_or_403()
+    if denied:
+        return denied
+
+    if not checker.is_checking():
+        return jsonify({"stopped": False, "message": "当前没有巡检在跑"})
+
+    checker.request_stop()
+    return jsonify({
+        "stopped": True,
+        "message": "已请求中止，已派出的探测会跑完后停下",
+    })
+
+
+@bp.route("/check/status", methods=["GET"])
+@jwt_required()
+def check_status():
+    """巡检运行状态 + 上一轮结果 + 下次计划时间。"""
+    from backend import checker
+
+    denied = _check_admin_or_403()
+    if denied:
+        return denied
+
+    cfg = checker.load_config()
+    next_run = checker.next_run_at(cfg)
+    last_run = checker.last_run_at()
+
+    return jsonify({
+        "running": checker.is_checking(),
+        # 上一轮的完整统计，**不分来源**（手动或定时都在这里）。
+        # 前端要显示"刚才那轮的结果"就读这个的 finished_at / alive / dead。
+        "last": checker.last_stats(),
+        "scheduler_alive": checker.scheduler_alive(),
+        "enabled": cfg["enabled"],
+        "next_run_at": next_run.isoformat() if next_run else None,
+        # 🔴 只记**定时**巡检的时间，手动触发不写。
+        #    否则用户手动扫 20 个账号就会把整池的定时巡检推迟一个周期 ——
+        #    手动小批量抽查和定时全量巡检不是一回事。
+        #    字段名带 scheduled_ 前缀就是为了让前端不会误当成"上次巡检时间"。
+        "scheduled_last_run_at": last_run.isoformat() if last_run else None,
+    })
+
+
+@bp.route("/check/config", methods=["GET", "POST"])
+@jwt_required()
+def check_config():
+    """读写巡检配置。"""
+    from backend import checker
+
+    denied = _check_admin_or_403()
+    if denied:
+        return denied
+
+    if request.method == "GET":
+        return jsonify({
+            "config": checker.load_config(),
+            # schema 一起返回，前端据此渲染表单 + 显示说明，
+            # 加配置项时前端不用跟着改。
+            "schema": {
+                key: {
+                    "default": default,
+                    "type": typ.__name__,
+                    "desc": desc,
+                    "choices": list(checker.ENUM_CHOICES.get(key, ())) or None,
+                }
+                for key, (default, typ, desc) in checker.CONFIG_SCHEMA.items()
+            },
+        })
+
+    data = request.get_json(silent=True) or {}
+    unknown = [k for k in data if k not in checker.CONFIG_SCHEMA]
+    if unknown:
+        # 明确报错而不是忽略：前端字段名拼错时静默丢弃，
+        # 表现为"保存成功但设置没变"，这种问题极难排查。
+        return jsonify({"error": f"未知配置项: {', '.join(unknown)}"}), 400
+
+    # 数值下限校验。concurrency=0 会让线程池永不执行、limit=0 等于关掉巡检
+    # 但开关还显示开着 —— 都是"看起来在工作其实没有"的状态。
+    for key in ("limit", "concurrency", "dead_threshold"):
+        if key in data:
+            try:
+                if int(data[key]) < 1:
+                    return jsonify({"error": f"{key} 至少为 1"}), 400
+            except (TypeError, ValueError):
+                return jsonify({"error": f"{key} 必须是整数"}), 400
+    for key in ("interval_hours", "timeout"):
+        if key in data:
+            try:
+                if float(data[key]) <= 0:
+                    return jsonify({"error": f"{key} 必须大于 0"}), 400
+            except (TypeError, ValueError):
+                return jsonify({"error": f"{key} 必须是数字"}), 400
+
+    try:
+        cfg = checker.save_config(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    log = OperationLog(
+        user_id=get_current_user_id(),
+        action="update_check_config",
+        resource_type="check_config",
+        details=f"巡检配置更新: {data}",
+        ip_address=request.remote_addr,
+    )
+    db.session.add(log)
+    db.session.commit()
+
+    return jsonify({
+        "config": cfg,
+        # 调度器每 60s 重读配置（SCHED_TICK），所以改动不是立刻生效。
+        # 不说明的话用户会以为没保存成功。
+        "message": f"已保存，定时任务最迟 {int(checker.SCHED_TICK)} 秒后按新配置执行",
+    })

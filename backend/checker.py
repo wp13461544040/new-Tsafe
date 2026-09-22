@@ -161,6 +161,11 @@ def _set_last_run(when: datetime) -> None:
     SystemConfig.set_value(LAST_RUN_KEY, when.isoformat(), "上次巡检完成时间")
 
 
+def last_run_at() -> datetime | None:
+    """上次巡检**完成**时间。公开给 API 用（别让调用方去碰 _get_last_run）。"""
+    return _get_last_run()
+
+
 def next_run_at(cfg: dict | None = None) -> datetime | None:
     """下次预计巡检时间。未启用时返回 None。"""
     cfg = cfg or load_config()
