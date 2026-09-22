@@ -1,0 +1,46 @@
+# 构建上下文是项目根 ⇒ 不排除的话 node_modules（几百 MB）和账号数据
+# 都会被打包传给 Docker daemon，构建慢且可能把凭据烧进镜像层。
+
+# 依赖与构建产物
+node_modules
+frontend/node_modules
+frontend/dist
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.ruff_cache
+venv
+env
+
+# 🔴 运行数据与凭据：绝不能进镜像
+# 镜像层是**不可删除**的——即便后续 RUN rm 掉，前一层里的文件仍能被提取出来。
+.env
+.env.*
+backend/data
+result
+exports
+evidence
+*.db
+*.sqlite3
+*.jsonl
+
+# 版本控制与 IDE
+.git
+.gitignore
+.github
+.vscode
+.idea
+.kiro
+
+# 文档与本地临时文件
+*.md
+*.log
+*.bak
+*.bak-*
+*.har
+*.eml
+t.py
+
+# 诊断探针：只在本地跑，不需要进镜像
+tools/probes

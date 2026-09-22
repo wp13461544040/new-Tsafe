@@ -1,0 +1,93 @@
+name: 构建并推送镜像
+
+# 触发时机：
+#   · push 到 main        → 更新 latest 与 main-<sha> 标签
+#   · 打 tag（v1.0.0）    → 额外产出 1.0.0 / 1.0 两个语义化标签
+#   · 手动触发            → 调试工作流本身时用
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # ghcr 的镜像名必须全小写，而仓库名带大写字母（new-Tsafe）⇒
+  # 不能直接用 github.repository，否则推送报 "invalid reference format"。
+  # 下面在 steps 里转成小写。
+  IMAGE_BASE: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # 🔴 推送到 ghcr.io 必须有这个权限。默认的 GITHUB_TOKEN 只有 read，
+      #    漏了它的表现是 `denied: permission_denied`，很容易被误认为要另建 PAT。
+      packages: write
+
+    strategy:
+      # 一个组件失败不影响另一个继续构建，便于一次看到两边的问题
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            dockerfile: backend/Dockerfile
+          - name: frontend
+            dockerfile: frontend/Dockerfile
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      # 镜像名转小写（见 env.IMAGE_BASE 的说明）
+      - name: 计算镜像名
+        id: img
+        run: |
+          echo "name=${REGISTRY}/${IMAGE_BASE,,}-${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+
+      - name: 配置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # 用内置 token，不需要自己建 PAT
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成标签与标注
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=sha,prefix=,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v5
+        with:
+          # 🔴 context 是**仓库根目录**，不是各自的子目录 ——
+          #    backend 需要 src/（`from src import config`），
+          #    只给 backend/ 会 ModuleNotFoundError。
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 用 GitHub Actions 缓存加速：只改代码时依赖层直接命中
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+      - name: 输出镜像地址
+        run: |
+          echo "### ${{ matrix.name }} 镜像已推送" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

@@ -1,50 +1,59 @@
-version: '3.8'
+# 本地开发/自建构建用：在本机构建镜像并运行。
+# 服务器上请用 docker-compose.prod.yml（直接拉 ghcr.io 的镜像，不在服务器编译）。
 
 services:
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: typesafe-backend
+      # 🔴 context 必须是**项目根目录** —— 代码里有 `from src import config`，
+      #    只给 backend/ 会 ModuleNotFoundError: No module named 'src'。
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: jev-backend
     restart: unless-stopped
-    ports:
-      - "5000:5000"
+
     volumes:
-      - ./backend/data:/app/data
-      - ./exports:/app/exports
+      # SQLite 库 + 自动生成的 JWT 密钥。不挂的话容器重建数据全丢、
+      # 密钥变化会把所有人踢下线
+      - backend-data:/app/backend/data
       - ./result:/app/result
+      - ./exports:/app/exports
+
+    expose:
+      - "5000"
+    # 本地想直连后端调试就打开
+    # ports:
+    #   - "5000:5000"
+
     # 配置无需在此声明：
     #   · 站点参数 → 代码内置默认值，要改走「系统设置 → 站点配置」页
     #   · 邮箱凭据 → 「邮箱配置」页（存数据库）
     #   · JWT 密钥 → 首次启动自动生成到 backend/data/.secret_key（已挂载持久化）
-    #
-    # 🔴 这里曾有 `SECRET_KEY=your-secret-key-change-this-in-production`：
-    #    ①变量名就是错的（代码读 `API_SECRET_KEY`，压根不生效）；
-    #    ②即便名字对，那也是个公开字符串 —— JWT 用它签名，等于没有认证。
-    #
-    # 多实例部署时才需要显式指定密钥（让各实例共享），取消下面这行的注释：
-    #   - API_SECRET_KEY=${API_SECRET_KEY}
     environment:
-      - FLASK_ENV=production
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+
     networks:
-      - typesafe-network
+      - jev-net
 
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: typesafe-frontend
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: jev-frontend
     restart: unless-stopped
-    ports:
-      - "80:80"
-    depends_on:
-      - backend
-    networks:
-      - typesafe-network
 
-networks:
-  typesafe-network:
-    driver: bridge
+    ports:
+      - "${HTTP_PORT:-80}:80"
+
+    depends_on:
+      backend:
+        condition: service_healthy
+
+    networks:
+      - jev-net
 
 volumes:
   backend-data:
+
+networks:
+  jev-net:
+    driver: bridge

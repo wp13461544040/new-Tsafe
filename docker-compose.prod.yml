@@ -1,0 +1,71 @@
+# 服务器部署用：直接拉 ghcr.io 的镜像，不在服务器上构建
+# （服务器通常没有 node/npm，也不该为了构建装一套工具链）。
+#
+# 用法：
+#   1. 只需要这一个文件，不用 clone 整个仓库
+#   2. export GH_OWNER=你的GitHub用户名   # 镜像名里的 owner，必须小写
+#   3. docker compose -f docker-compose.prod.yml up -d
+#
+# 更新到新版本：
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  backend:
+    # 镜像名必须全小写。IMAGE_TAG 默认 latest，要钉版本就传 v1.0.0 之类
+    image: ghcr.io/${GH_OWNER:?请先设置 GH_OWNER 环境变量}/new-tsafe-backend:${IMAGE_TAG:-latest}
+    container_name: jev-backend
+    restart: unless-stopped
+
+    volumes:
+      # 🔴 这个必须挂：SQLite 库与自动生成的 JWT 密钥都在里面。
+      #    不挂的话容器重建后管理员账号、卡密、账号池全丢，
+      #    而且密钥变化会让所有人被踢下线。
+      - backend-data:/app/backend/data
+      # 注册器的交付物（accounts.json 等）。想在宿主机直接看就挂成绑定卷
+      - ./result:/app/result
+      - ./exports:/app/exports
+
+    # 不对外暴露端口：只让 frontend 容器通过内部网络访问。
+    # 要直连后端调试的话取消下面两行的注释（注意那会绕过 nginx）。
+    # ports:
+    #   - "5000:5000"
+    expose:
+      - "5000"
+
+    environment:
+      # 多实例部署才需要显式指定（让各实例共享同一个签名密钥）。
+      # 单实例留空即可 —— 容器会自动生成并存到挂载的 data 卷里。
+      - API_SECRET_KEY=${API_SECRET_KEY:-}
+      # 首次启动创建管理员用。留空则随机生成，看 `docker compose logs backend` 取。
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+
+    networks:
+      - jev-net
+
+  frontend:
+    image: ghcr.io/${GH_OWNER:?请先设置 GH_OWNER 环境变量}/new-tsafe-frontend:${IMAGE_TAG:-latest}
+    container_name: jev-frontend
+    restart: unless-stopped
+
+    ports:
+      # 左边是宿主机端口，按需改成 8080 之类避开已占用的 80
+      - "${HTTP_PORT:-80}:80"
+
+    depends_on:
+      backend:
+        # 等后端健康检查通过再启动 —— 否则 nginx 首次代理会 502，
+        # 用户刷新一下就好，但看起来像"部署失败"
+        condition: service_healthy
+
+    networks:
+      - jev-net
+
+volumes:
+  # 命名卷由 Docker 管理，`docker compose down` 不会删（要删得加 -v）
+  backend-data:
+
+networks:
+  jev-net:
+    driver: bridge

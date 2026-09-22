@@ -3,3 +3,9 @@ flask-sqlalchemy==3.1.1
 flask-cors==4.0.0
 flask-jwt-extended==4.6.0
 Werkzeug==3.0.1
+# 🔴 注册器的三个邮箱客户端（src/tempemail.py、remail.py、moemail.py）都用它。
+#    漏掉的话容器启动正常，但一跑批就 ModuleNotFoundError —— 而那时任务已经
+#    建好了，只会显示 failed，看不出是缺依赖。
+requests==2.32.3
+# WSGI 服务器（生产用，Dockerfile 的 CMD 依赖它）
+gunicorn==23.0.0
