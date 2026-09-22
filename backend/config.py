@@ -50,10 +50,6 @@ CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 UPLOAD_FOLDER = BASE_DIR / "backend" / "uploads"
 MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
 
-# 分页配置
-DEFAULT_PAGE_SIZE = 20
-MAX_PAGE_SIZE = 100
-
 # 卡密配置
 CARD_KEY_PREFIX = "TS"
 CARD_KEY_LENGTH = 16

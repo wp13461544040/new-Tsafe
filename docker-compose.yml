@@ -13,9 +13,14 @@ services:
       - ./backend/data:/app/data
       - ./exports:/app/exports
       - ./result:/app/result
+    # 🔴 配置全部从 .env 读，**不在这里写死任何密钥**。
+    #    这里曾有 `SECRET_KEY=your-secret-key-change-this-in-production`：
+    #    ①变量名就是错的（代码读 `API_SECRET_KEY`，这个压根不生效）；
+    #    ②即便名字对，那也是个公开字符串 —— JWT 用它签名，等于没有认证。
+    env_file:
+      - .env
     environment:
       - FLASK_ENV=production
-      - SECRET_KEY=your-secret-key-change-this-in-production
     networks:
       - typesafe-network
 
