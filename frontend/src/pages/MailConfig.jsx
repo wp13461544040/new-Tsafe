@@ -268,7 +268,7 @@ export default function MailConfig() {
                 rules={[{ required: true, message: '请输入 MoeMail 服务地址' }]}
                 extra="不要带尾部斜杠，保存时会自动去掉"
               >
-                <Input placeholder="https://julydd.site" />
+                <Input placeholder="https://your-moemail.example.com" />
               </Form.Item>
 
               <Form.Item

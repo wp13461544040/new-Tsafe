@@ -5,8 +5,8 @@
     1. GET  /login                        -> 从 HTML 里抓 3 个 Server Action
     2a. POST /login  ACTION_2             -> 确认邮件（Stytch magic_links）
     2b. POST /login  ACTION_3             -> 6 位验证码邮件（Stytch otp）
-    3.  (仅魔法链接) GET  login.typesafe.ai/v1/magic_links/redirect?...  -> 拿到 dfp 交换参数
-        POST login.typesafe.ai/v1/magic_links/redirect/dfp             -> 拿 Stytch session token
+    3.  (仅魔法链接) GET  <STYTCH_LOGIN_HOST>/v1/magic_links/redirect?... -> 拿 dfp 交换参数
+        POST <STYTCH_LOGIN_HOST>/v1/magic_links/redirect/dfp           -> 拿 Stytch session token
     4. POST /api/auth/callback  {token, tokenType, …}                 -> 建立控制台会话
     5. GET  /hook（**不跟随重定向**）                                  -> 读出 onboarding 门禁
     6. POST /setup/tos → /setup/set-name                              -> 完成 onboarding

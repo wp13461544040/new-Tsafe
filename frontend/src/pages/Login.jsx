@@ -79,10 +79,6 @@ export default function Login() {
             </Button>
           </Form.Item>
         </Form>
-        
-        <div style={{ textAlign: 'center', color: '#999', fontSize: 12 }}>
-          默认账号: admin / admin123
-        </div>
       </Card>
     </div>
   )

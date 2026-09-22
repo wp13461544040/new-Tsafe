@@ -1,4 +1,5 @@
-"""Flask API 主文件"""
+﻿"""Flask API 主文件"""
+import secrets
 import sys
 from pathlib import Path
 
@@ -63,7 +64,7 @@ def run_migrations():
     if added_all:
         db.session.commit()
         for table, cols in added_all.items():
-            print(f"✅ 数据库迁移完成，{table} 新增列: {', '.join(cols)}")
+            print(f"[OK] 数据库迁移完成，{table} 新增列: {', '.join(cols)}")
 
 
 def create_app():
@@ -144,13 +145,30 @@ def create_app():
         db.create_all()
         run_migrations()
         
-        # 创建默认管理员
-        if not User.query.filter_by(username="admin").first():
-            admin = User(username="admin", role="admin")
-            admin.set_password("admin123")
+        # 创建初始管理员。密码来自 ADMIN_PASSWORD，未配置则随机生成。
+        if not User.query.filter_by(username=config.ADMIN_USERNAME).first():
+            password = config.ADMIN_PASSWORD or secrets.token_urlsafe(12)
+
+            admin = User(username=config.ADMIN_USERNAME, role="admin")
+            admin.set_password(password)
             db.session.add(admin)
             db.session.commit()
-            print("✅ 默认管理员已创建: admin / admin123")
+
+            if config.ADMIN_PASSWORD:
+                print(f"[OK] 初始管理员已创建：{config.ADMIN_USERNAME}（密码取自 ADMIN_PASSWORD）")
+            else:
+                # 🔴 随机密码**只在这里打印一次**，不落盘、不在页面显示。
+                #    错过就只能删库重建或手工改密码 —— 所以打得醒目些。
+                #
+                # ⚠️ 这几行**不能带 emoji**：Windows 控制台默认 GBK，
+                #    emoji 会抛 UnicodeEncodeError 让首次启动直接崩
+                #    （而这正是最不该崩的一次 —— 崩了就拿不到密码）。
+                print("=" * 64)
+                print("[ 初始管理员已创建，密码随机生成，请立即保存 ]")
+                print(f"    用户名: {config.ADMIN_USERNAME}")
+                print(f"    密  码: {password}")
+                print("  此密码不会再次显示。可在 .env 里设 ADMIN_PASSWORD 固定它。")
+                print("=" * 64)
         
         # 初始化系统配置
         if not SystemConfig.query.filter_by(key="announcement").first():
@@ -172,14 +190,18 @@ def create_app():
     from backend.executor import recover_stale_tasks
     n = recover_stale_tasks(app)
     if n:
-        print(f"⚠️  已将 {n} 个残留的 running 任务标记为 failed（服务重启导致中断）")
+        print(f"[WARN] 已将 {n} 个残留的 running 任务标记为 failed（服务重启导致中断）")
     
     return app
 
 
 if __name__ == "__main__":
     app = create_app()
-    print("🚀 后端 API 启动中...")
-    print(f"📍 访问地址: http://127.0.0.1:5000")
-    print(f"👤 默认账号: admin / admin123")
+
+    if config.SECRET_KEY_IS_EPHEMERAL:
+        print("[WARN] 未配置 API_SECRET_KEY，本次使用临时随机密钥 ——")
+        print("    重启后所有登录态失效。生产环境请在 .env 里固定它。")
+
+    print("后端 API 启动中...")
+    print("访问地址: http://127.0.0.1:5000")
     app.run(host="0.0.0.0", port=5000, debug=config.DEBUG)

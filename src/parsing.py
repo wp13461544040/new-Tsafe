@@ -48,7 +48,7 @@ from . import config
 ACTION_FIELD_RE = re.compile(r'name="\$ACTION_(\d+):(\d+)"\s+value="([^"]*)"')
 ACTION_KEY_RE = re.compile(r'name="\$ACTION_KEY"\s+value="([^"]*)"')
 
-#: 魔法链接落地页 URL（`login.typesafe.ai/v1/magic_links/redirect?...`）。
+#: 魔法链接落地页 URL（`<STYTCH_LOGIN_HOST>/v1/magic_links/redirect?...`）。
 #:
 #: 🔴 用 `config.STYTCH_LOGIN_HOST` 派生，**不要在这里再写一遍域名**。
 #: 2026-09-20 二轮审计发现：该常量当时**零引用**，而同一个 URL 在

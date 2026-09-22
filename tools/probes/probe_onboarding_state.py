@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from _bootstrap import *  # noqa: F401,F403,E402
 
+from src import config  # noqa: E402
 from src.parsing import actions_from_html, visible_text  # noqa: E402
 from src.tempemail import TempMailClient  # noqa: E402
 from src.typesafe import MODE_LINK, TypeSafeClient  # noqa: E402
@@ -55,7 +56,7 @@ print(f"needs_tos={st['needs_tos']} needs_name={st['needs_name']} "
 print("\n### 各 /setup/* 页面渲染形态")
 for path in ("/setup/tos?returnTo=%2Fhook", "/setup/set-name?returnTo=%2Fhook",
              "/setup/console-survey?returnTo=%2Fhook", "/hook"):
-    r = cl.s.get(f"https://console.typesafe.ai{path}", timeout=30)
+    r = cl.s.get(f"{config.SITE_ORIGIN}{path}", timeout=30)
     acts = actions_from_html(r.text)
     print(f"  {path:44s} HTTP {r.status_code} len={len(r.text):6d} "
           f"actions={sorted(acts)} txt={visible_text(r.text)[:110]!r}")

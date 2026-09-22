@@ -5,25 +5,22 @@
 
 2026-09-21：邀请制取消，营销流整体消失
 ──────────────────────────────────────
-本表曾经要处理**六类**邮件，其中两类来自营销流（Loops/SES 的
-`envelope.updates.typesafe.ai`）：
+本表曾经要处理**六类**邮件，其中两类来自营销流（Loops/SES 的独立子域），
+主题分别是 "Your account is ready"（获批）与 "You're on the waitlist"（申请确认）。
 
-    envelope.updates.typesafe.ai   x15   TypeSafe AI: Your account is ready      ← 获批
-    envelope.updates.typesafe.ai   x9    TypeSafe AI: You're on the waitlist...   ← 申请确认
-
-TypeSafe 取消邀请制后，**这两类邮件不再产生**（申请与审批两个环节都没了），
+站点取消邀请制后，**这两类邮件不再产生**（申请与审批两个环节都没了），
 对应的 `waitlist_confirm` / `account_ready` 两条规则连同 `SENDER_UPDATES`
-常量一起删除。现在窗口内只剩**事务流**（SendGrid `em5082` / Postmark
-`pm-bounces`）：
+常量一起删除。现在窗口内只剩**事务流**（SendGrid / Postmark 两个子域）：
 
-    em5082.typesafe.ai             Welcome to TypeSafe — confirm your email  ← 主路径凭据
-    em5082.typesafe.ai / pm-bounces.typesafe.ai  Your TypeSafe sign-in code
-    em5082.typesafe.ai / pm-bounces.typesafe.ai  Your TypeSafe verification code
-    dm.openxlab.org.cn             【OpenXLab】注册激活                       ← 邻居项目
+    <发件子域>        Welcome to ... — confirm your email   ← 主路径凭据
+    <发件子域>        Your ... sign-in code
+    <发件子域>        Your ... verification code
 
-⚠️ **删除的判据是可实测的**，不要凭印象把规则加回来：窗口内若再出现
-   `envelope.updates.typesafe.ai` 的信，`--mode scan` 会把它列进
-   "漏网主题"（这正是 `diagnose()` 存在的意义），届时再按实际文案补规则。
+⚠️ **删除的判据是可实测的**，不要凭印象把规则加回来：窗口内若再出现营销流的信，
+   `--mode scan` 会把它列进"漏网主题"（这正是 `diagnose()` 存在的意义），
+   届时再按实际文案补规则。
+
+⚠️ 发件人域由 `.env` 的 `SENDER_DOMAIN` 提供 —— 本文件**不写死域名**。
 
 为什么仍然**必须叠加主题**（这条教训与邀请制无关，长期有效）
 ────────────────────────────────────────────────────────────
@@ -37,8 +34,8 @@ TypeSafe 取消邀请制后，**这两类邮件不再产生**（申请与审批�
 1. 主题里可能出现**弯引号** U+2019（`You’re …`）。
    按 `you're`（直引号 U+0027）匹配**永远不中**。所以规则只用无标点的片段，
    并在匹配前做一次 Unicode 归一化兜底。
-2. 信封发件人里**内嵌了收件人地址**（VERP 回弹编码）：
-   `bounces+<acct>-<shard>-oai-ecc230d8aa7f4bf2=example-mail.test@em5082.typesafe.ai`
+2. 信封发件人里**内嵌了收件人地址**（VERP 回弹编码），形如
+   `bounces+<acct>-<shard>-<hash>=<收件人本地部分>.<收件域>@<发件子域>`
    这可以当一条免费的收件人一致性校验用，但**不要**把它当收件人字段的替代
    （`to` 才是权威字段）。
 
@@ -59,11 +56,16 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from . import config
+
 # ── 发件人域常量（改这里就够了，不要在规则里散落字符串） ───────────────
-# 全部 TypeSafe 流量的信封域都以此结尾（em5082 / pm-bounces）
-SENDER_TYPESAFE = "typesafe.ai"
+# 目标站点全部邮件流量的信封域都以此结尾（各子域如 em* / pm-bounces* 都覆盖）。
+# 🔴 从 `config.SENDER_DOMAIN`（.env）读，**不在这里写死域名** ——
+#    写死等于把目标站点标识提交进仓库。缺失时由 `config.validate_site()` 报出来，
+#    不在这里兜默认值：兜了会让规则静默匹配不到任何邮件，表现是"永远等不到信"。
+SENDER_TYPESAFE = config.SENDER_DOMAIN
 #
-# ⚠️ 这里曾有一个 `SENDER_UPDATES = "envelope.updates.typesafe.ai"`，
+# ⚠️ 这里曾有一个指向营销流子域的 `SENDER_UPDATES` 常量，
 # 2026-09-21 随邀请制取消一并删除 —— 它只被 `waitlist_confirm` /
 # `account_ready` 两条规则引用，而那两条已不存在。
 # 删除是**功能性的**（不是清理）：留着它会让人以为营销流还要处理。

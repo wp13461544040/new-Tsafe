@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -36,7 +37,8 @@ import requests  # noqa: E402
 from src import config  # noqa: E402
 from src.ledger import Ledger  # noqa: E402
 
-API_URL = "https://api.typesafe.ai/v1/systemone"
+#: 验收用的 API 端点。从 .env 读，不写死域名（同 config 里其它站点标识的理由）。
+API_URL = os.getenv("VERIFY_API_URL", "")
 
 PROBE_BODY = {
     "state": "The build has been failing on CI for three days and the release is tomorrow.",
@@ -68,6 +70,13 @@ def verify(key: str, *, timeout: float = 90.0, retries: int = 2) -> dict:
     ⇒ 判据是「**有没有拿到 HTTP 响应**」，不是「成功还是失败」。
       有响应 ⇒ 确定性结论，**不重试**（401 重试一万次还是 401，只会浪费时间）。
     """
+    if not API_URL:
+        # 空地址会让 requests 抛 MissingSchema，错误信息指不出真因 ⇒ 显式拦。
+        raise SystemExit(
+            "✗ 未配置 VERIFY_API_URL —— 无法验收 key。\n"
+            "  修法：在 .env 里填入验收端点（形如 https://api.example.com/v1/xxx）"
+        )
+
     t0 = time.time()
     last: dict = {"ok": False, "status": 0, "error": "未执行", "elapsed": 0.0}
     for attempt in range(retries + 1):

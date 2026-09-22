@@ -1,4 +1,4 @@
-// 用真实 bundle 复现/验证 `bodyCandidates is not defined`。
+﻿// 用真实 bundle 复现/验证 `bodyCandidates is not defined`。
 //
 // 背景（2026-09-20）：共享 temp-email-worker 从 07:46 起，**每一封**邮件的
 // email 事件都以 `outcome: exception` 结束，日志消息 `bodyCandidates is not defined`。
@@ -25,7 +25,7 @@ const HTML_IMPORT_RE = /^import ADMIN_HTML from "\.\/[^"]+\.html";$/m;
 // 一封**多部分**邮件：只有非 body-only 的邮件才会走到出问题的那一行，
 // 所以 fixture 必须让 `bodyOnly` 为 falsy（发件人不在 BODY_ONLY_RULES 里）。
 const RAW = [
-  "From: TypeSafe <bounces+<acct>-x@em5082.typesafe.ai>",
+  "From: Sender <bounces+<acct>-x@mail.example.com>",
   "To: probe@example-mail.test",
   "Subject: Your TypeSafe sign-in code",
   "MIME-Version: 1.0",
@@ -63,7 +63,7 @@ function makeMessage() {
                            ["message-id", "<probe-1@example-mail.test>"]]);
   return {
     to: "probe@example-mail.test",
-    from: "bounces+<acct>-x@em5082.typesafe.ai",
+    from: "bounces+<acct>-x@mail.example.com",
     headers: { get: (k) => headers.get(String(k).toLowerCase()) ?? null },
     raw: new Response(RAW).body
   };

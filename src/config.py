@@ -98,10 +98,16 @@ MOEMAIL_DOMAIN = os.getenv("MOEMAIL_DOMAIN", "")
 # 默认 1 天：注册流程分钟级就结束，但留足余量给补跑（`resume_pending.py`）。
 MOEMAIL_EXPIRY_MS = int(os.getenv("MOEMAIL_EXPIRY_MS", "86400000"))
 
-# ── TypeSafe 站点 ───────────────────────────────────────────────────────
-SITE_ORIGIN = "https://console.typesafe.ai"
-SITE_LOGIN = f"{SITE_ORIGIN}/login"
-STYTCH_LOGIN_HOST = "https://login.typesafe.ai"
+# ── 目标站点 ────────────────────────────────────────────────────────────
+# 🔴 不留真实默认值 —— 同 `TEMPMAIL_BASE` 的理由：站点标识写进仓库等于公开
+#    "这个工具在对谁做批量注册"。这类信息单独看不是凭据，但一旦公开就永久公开。
+#
+# 三项都走 .env，缺失由 `validate()` 报出来。
+SITE_ORIGIN = os.getenv("SITE_ORIGIN", "").rstrip("/")
+SITE_LOGIN = f"{SITE_ORIGIN}/login" if SITE_ORIGIN else ""
+STYTCH_LOGIN_HOST = os.getenv("STYTCH_LOGIN_HOST", "").rstrip("/")
+#: 邮件发件人域（用于 `mailrules` 匹配验证邮件）。
+SENDER_DOMAIN = os.getenv("SENDER_DOMAIN", "")
 
 # ── Framer 表单（waitlist 申请）—— **已于 2026-09-21 整体移除** ─────────
 #
@@ -181,7 +187,17 @@ def validate(*, need_tempmail: bool = True) -> list[str]:
                          ("TEMPMAIL_DOMAIN", TEMPMAIL_DOMAIN)):
             if not val:
                 missing.append(key)
+
+    # 目标站点三项与邮箱后端无关，任何后端都要有 —— 所以不受 need_tempmail 影响
+    missing.extend(validate_site())
     return missing
+
+
+def validate_site() -> list[str]:
+    """目标站点三项。所有跑批路径都需要，与选哪个邮箱后端无关。"""
+    return [k for k, v in (("SITE_ORIGIN", SITE_ORIGIN),
+                           ("STYTCH_LOGIN_HOST", STYTCH_LOGIN_HOST),
+                           ("SENDER_DOMAIN", SENDER_DOMAIN)) if not v]
 
 
 def validate_cf() -> list[str]:
@@ -217,7 +233,8 @@ def validate_for_backend(backend: str) -> list[str]:
     """
     name = (backend or "").strip().lower()
     if name == "remail":
-        return validate_remail()
+        # 邮箱后端两项 + 站点三项（站点与后端无关，漏了同样跑不了）
+        return validate_remail() + validate_site()
     if name == "moemail":
-        return validate_moemail()
+        return validate_moemail() + validate_site()
     return validate()

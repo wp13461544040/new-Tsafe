@@ -129,7 +129,8 @@ def cmd_scan(backend: str = DEFAULT_MAIL_BACKEND) -> int:
     hi = max(m.received_at for m in msgs)
     print(f"窗口 {len(msgs)} 封，时间跨度 {(hi - lo) / 60000:.1f} 分钟"
           f"（服务端保留最近 100 行，超出即删）")
-    print("发件人过滤：sender 含 typesafe.ai（规则表逐条见 src/mailrules.py）\n")
+    print(f"发件人过滤：sender 含 {config.SENDER_DOMAIN or '(未配置 SENDER_DOMAIN)'}"
+          f"（规则表逐条见 src/mailrules.py）\n")
 
     d = diagnose(msgs)
     for rule in RULES:
@@ -140,7 +141,7 @@ def cmd_scan(backend: str = DEFAULT_MAIL_BACKEND) -> int:
             print(f"        {m.recipient:<42} {m.received_at}")
         if len(hits) > 3:
             print(f"        …（共 {len(hits)} 封）")
-    print(f"\n  邻居项目/无关邮件（发件人不含 typesafe.ai）：{d['foreign']} 封")
+    print(f"\n  无关邮件（发件人不含目标域）：{d['foreign']} 封")
 
     un = d["unclaimed_subjects"]
     if un:

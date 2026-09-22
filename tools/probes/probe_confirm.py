@@ -109,10 +109,10 @@ def main() -> int:
     hr("2. POST /v1/magic_links/redirect/dfp")
     body = dict(payload)
     body["telemetry_id"] = ""
-    r2 = s.post("https://login.typesafe.ai/v1/magic_links/redirect/dfp", json=body,
+    r2 = s.post(f"{config.STYTCH_LOGIN_HOST}/v1/magic_links/redirect/dfp", json=body,
                 headers={"Accept": "application/json",
                          "Content-Type": "application/json;charset=UTF-8",
-                         "Origin": "https://login.typesafe.ai",
+                         "Origin": config.STYTCH_LOGIN_HOST,
                          "Referer": link}, timeout=40)
     dump(r2, body=800)
     redirect_url = ""
