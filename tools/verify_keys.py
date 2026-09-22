@@ -65,7 +65,13 @@ def verify(key: str, *, timeout: float = 90.0, retries: int = 2) -> dict:
             "  修法：设环境变量 VERIFY_API_URL，或在 Web 端「系统设置 → 站点配置」里填。"
         )
 
-    res = keycheck.check_key(key, api_url=API_URL, timeout=timeout, retries=retries)
+    # 🔴 显式 inference：交付验收要的是"这把 key 真能跑出答案"，
+    #    不是"认证没被拒"。这里消耗额度是**可接受的**（一次性、人工发起）；
+    #    定时巡检才需要零额度的 probe 模式。
+    #    不写这个参数的话会跟着 check_key 的默认值变成 probe，
+    #    验收报告就会把"认证通过但推理失败"的 key 也算成可用。
+    res = keycheck.check_key(key, api_url=API_URL, mode="inference",
+                             timeout=timeout, retries=retries)
     out = res.to_dict()
     # `noul` 是本工具特有的展示字段，keycheck 不关心它 ⇒ 这里补一次
     out.setdefault("noul", None)
