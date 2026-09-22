@@ -211,9 +211,11 @@ export default function AccountCheckBar({ onFinished, compact = false }) {
             {
               key: 'mode',
               label: '探测方式',
-              children: last.mode === 'inference'
-                ? <Tag color="orange">真实推理（消耗额度）</Tag>
-                : <Tag color="green">零额度探测</Tag>
+              children: (
+                <Tooltip title="只验证认证是否通过，不触发模型推理，不产生 token 消耗">
+                  <Tag color="green" style={{ cursor: 'help' }}>零额度探测</Tag>
+                </Tooltip>
+              )
             },
             {
               key: 'result',

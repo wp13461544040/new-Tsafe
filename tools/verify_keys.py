@@ -42,7 +42,8 @@ from src.ledger import Ledger  # noqa: E402
 #: 且能被 Web 端「站点配置」页覆盖）。
 API_URL = os.getenv("VERIFY_API_URL", "") or config.VERIFY_API_URL
 
-#: 探测请求体的真源在 `src/keycheck.py` —— 这里只是给日志/报告引用。
+#: 探测请求体的真源在 `src/keycheck.py`（空 JSON —— 零额度）。
+#: 这里只是给日志/报告引用。
 PROBE_BODY = keycheck.PROBE_BODY
 
 
@@ -65,12 +66,12 @@ def verify(key: str, *, timeout: float = 90.0, retries: int = 2) -> dict:
             "  修法：设环境变量 VERIFY_API_URL，或在 Web 端「系统设置 → 站点配置」里填。"
         )
 
-    # 🔴 显式 inference：交付验收要的是"这把 key 真能跑出答案"，
-    #    不是"认证没被拒"。这里消耗额度是**可接受的**（一次性、人工发起）；
-    #    定时巡检才需要零额度的 probe 模式。
-    #    不写这个参数的话会跟着 check_key 的默认值变成 probe，
-    #    验收报告就会把"认证通过但推理失败"的 key 也算成可用。
-    res = keycheck.check_key(key, api_url=API_URL, mode="inference",
+    # 🟢 零额度探测：验的是"认证通过且无额度/订阅异常"，**不发起推理**。
+    #    这意味着本工具**不再断言"这把 key 真能跑出答案"** —— 那需要一次真实
+    #    推理调用，而验收同样不允许消耗账号额度。
+    #    影响：若存在"认证正常但模型调用失败"的情况，这里会报可用。
+    #    需要确认推理能力时，人工挑一把单独调一次，不要改成批量真实调用。
+    res = keycheck.check_key(key, api_url=API_URL,
                              timeout=timeout, retries=retries)
     out = res.to_dict()
     # `noul` 是本工具特有的展示字段，keycheck 不关心它 ⇒ 这里补一次
@@ -162,9 +163,11 @@ def main() -> int:
         v["api_key_id"] = rec.get("api_key_id", "")
         results.append(v)
         flag = "✓" if v["ok"] else "✗"
-        extra = (f"model={v.get('model')} noul={v.get('noul')} "
-                 f"tokens={v.get('usage', {}).get('input_tokens', '?')}") if v["ok"] \
-            else f"HTTP {v['status']} {v.get('error', '')[:70]}"
+        # 零额度探测拿不到 model / usage（那些只在真实推理响应里有）。
+        # 打印 verdict + 探测状态码：前者区分"真失效"与"读不出来"，
+        # 后者用于确认探测确实走到了参数校验阶段（预期 400/422）。
+        extra = (f"认证通过 HTTP {v.get('probe_status', v['status'])}") if v["ok"] \
+            else f"{v.get('verdict', '?')} HTTP {v['status']} {v.get('error', '')[:70]}"
         print(f"  [{i}/{len(items)}] {flag} {rec.get('email', ''):<42} "
               f"{v['elapsed']:.1f}s  {extra}")
 

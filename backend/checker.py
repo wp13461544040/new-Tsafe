@@ -59,9 +59,6 @@ CONFIG_SCHEMA: dict[str, tuple] = {
     "concurrency": (5, int, "并发探测数"),
     "dead_threshold": (2, int, "连续几次判定失效才标记为 invalid"),
     "include_assigned": (False, bool, "是否也检查已被卡密提取的账号"),
-    # 🔴 默认 probe（零额度）。inference 每次约消耗 317 tokens，
-    #    1600 账号 × 每 6 小时一轮 ≈ 6500 次推理/天，纯属白烧额度。
-    "mode": ("probe", str, "probe=零额度只验认证 / inference=真实推理最准但消耗额度"),
     "timeout": (30.0, float, "单次探测超时（秒）"),
     # 跳过最近这么多小时内检查过的。默认 0 = 跟随 interval_hours
     # （避免"间隔 6 小时但每轮都把同一批又检查一遍"）。
@@ -78,13 +75,15 @@ SCHED_TICK = 60.0
 #:    频繁重启（改配置、更新镜像）会变成反复打验收端点。
 LAST_RUN_KEY = CONFIG_PREFIX + "last_run_at"
 
-#: 枚举型配置的合法取值。
-#: 🔴 必须白名单：`mode` 拼错成 "infrence" 时，`str()` 会老实存进去，
-#:    keycheck 那边 `mode != "inference"` 就静默走 probe ——
-#:    用户以为开了真实推理校验，其实没有，而且**完全没有报错**。
-ENUM_CHOICES: dict[str, tuple[str, ...]] = {
-    "mode": ("probe", "inference"),
-}
+#: 枚举型配置的合法取值（键 → 允许的值）。
+#:
+#: 目前为空 —— 探测方式已固定为零额度，没有可选项了。
+#: 机制保留是因为 load_config / save_config 已经接好了校验分支：
+#: 以后加枚举配置只需在这里登记，不必再改那两个函数。
+#: 🔴 枚举**必须**走白名单。曾经有过 `mode` 配置，拼错成 "infrence" 时
+#:    `str()` 会老实存进去、执行时静默回落到默认值 —— 用户以为改生效了，
+#:    其实没有，而且完全没有报错。
+ENUM_CHOICES: dict[str, tuple[str, ...]] = {}
 
 _sched_thread: threading.Thread | None = None
 _sched_stop: threading.Event | None = None
@@ -120,8 +119,9 @@ def save_config(values: dict) -> dict:
 
     Raises:
         ValueError: 枚举型配置传了非法值。这里**故意抛**而不是静默退回默认 ——
-            用户在页面上选了 inference 却因拼写落回 probe，他不会知道，
-            结果是"以为在做严格校验，其实一直是宽松模式"。
+            静默回落会让用户以为设置生效了，而实际跑的是另一套参数，
+            且没有任何提示能让他发现。（ENUM_CHOICES 当前为空，
+            此分支为以后新增枚举配置预留。）
     """
     from backend.models import SystemConfig
 
@@ -239,9 +239,10 @@ def _pick_targets(*, limit: int, include_assigned: bool,
 def run_check(app, *, limit: int = 200, concurrency: int = 5,
               dead_threshold: int = 2, include_assigned: bool = False,
               min_interval_hours: float = 0.0, timeout: float = 30.0,
-              mode: str = "probe",
               triggered_by: str = "manual", user_id: int | None = None) -> dict:
     """跑一轮巡检（**同步**，调用方负责决定是否放到线程里）。
+
+    探测走 `keycheck.check_key`，**不消耗账号额度**（空 body、只验认证）。
 
     Args:
         limit: 本轮最多检查多少个
@@ -250,7 +251,6 @@ def run_check(app, *, limit: int = 200, concurrency: int = 5,
         include_assigned: 是否也检查已被卡密提取的账号
         min_interval_hours: 跳过最近这么多小时内检查过的（0=不跳过）
         timeout: 单次探测超时
-        mode: probe（零额度，默认）/ inference（真实推理，消耗 token 额度）
         triggered_by: manual / schedule，只用于日志
         user_id: 记操作日志用
 
@@ -270,7 +270,7 @@ def run_check(app, *, limit: int = 200, concurrency: int = 5,
     stats = {
         "ok": True, "checked": 0, "alive": 0, "dead": 0, "unknown": 0,
         "newly_invalid": 0, "recovered": 0, "total": 0,
-        "aborted": "", "triggered_by": triggered_by, "mode": mode,
+        "aborted": "", "triggered_by": triggered_by,
         "started_at": datetime.utcnow().isoformat(),
     }
 
@@ -300,8 +300,8 @@ def run_check(app, *, limit: int = 200, concurrency: int = 5,
 
             with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
                 futures = {
-                    pool.submit(keycheck.check_key, key, api_url=api_url,
-                                mode=mode, timeout=timeout): aid
+                    pool.submit(keycheck.check_key, key,
+                                api_url=api_url, timeout=timeout): aid
                     for aid, key in targets
                 }
 
@@ -452,7 +452,6 @@ def _scheduler_loop(app, stop: threading.Event) -> None:
                     include_assigned=cfg["include_assigned"],
                     min_interval_hours=min_gap,
                     timeout=cfg["timeout"],
-                    mode=cfg["mode"],
                     triggered_by="schedule",
                 )
 

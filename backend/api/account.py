@@ -568,7 +568,7 @@ def trigger_check():
     # 只接受这几项覆盖。enabled / interval_hours 是定时任务的事，
     # 手动触发时传进来没有意义，静默忽略比报错更合适。
     overridable = ("limit", "concurrency", "dead_threshold",
-                   "include_assigned", "timeout", "min_interval_hours", "mode")
+                   "include_assigned", "timeout", "min_interval_hours")
     kwargs = {}
     for key in overridable:
         kwargs[key] = cfg[key]
@@ -583,6 +583,8 @@ def trigger_check():
             except (TypeError, ValueError):
                 return jsonify({"error": f"参数 {key} 格式不对"}), 400
 
+            # ENUM_CHOICES 目前是空的（探测方式已固定为零额度，无可选项）。
+            # 这个分支留着是为了以后加枚举配置时不用回来改这里。
             choices = checker.ENUM_CHOICES.get(key)
             if choices and kwargs[key] not in choices:
                 return jsonify({

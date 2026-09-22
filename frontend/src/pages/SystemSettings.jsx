@@ -24,7 +24,6 @@ const CHECK_LABELS = {
   concurrency: '并发探测数',
   dead_threshold: '连续失败几次判失效',
   include_assigned: '同时检查已提取的账号',
-  mode: '探测方式',
   timeout: '单次超时（秒）',
   min_interval_hours: '跳过最近N小时内已检查的'
 }
@@ -36,15 +35,9 @@ const CHECK_HINTS = {
   concurrency: '太高可能被目标站点限流，限流会被判成「无法判定」而不是失效。',
   dead_threshold: '设 1 会让一次网络抖动就把账号标失效，建议至少 2。',
   include_assigned: '已提取的账号即使探测失效也不会被改状态，只记录结论供排查。',
-  mode: '零额度探测只验证认证是否通过，不产生 token 消耗；真实推理最准但每次约消耗 317 tokens。',
   timeout: '超时会被判成「无法判定」，不会误标失效。',
   min_interval_hours: '0 表示跟随巡检间隔。手动触发时此项始终按 0 处理。'
 }
-
-const MODE_OPTIONS = [
-  { value: 'probe', label: '零额度探测（推荐）' },
-  { value: 'inference', label: '真实推理（消耗额度）' }
-]
 
 export default function SystemSettings() {
   const [announcementForm] = Form.useForm()
@@ -61,7 +54,6 @@ export default function SystemSettings() {
   const [checkSchema, setCheckSchema] = useState({})
   const [checkLoading, setCheckLoading] = useState(false)
   const [checkSaving, setCheckSaving] = useState(false)
-  const [checkMode, setCheckMode] = useState('probe')
 
   useEffect(() => {
     loadAnnouncement()
@@ -95,7 +87,6 @@ export default function SystemSettings() {
       const res = await getAccountCheckConfig()
       setCheckSchema(res.schema || {})
       checkForm.setFieldsValue(res.config || {})
-      setCheckMode(res.config?.mode || 'probe')
     } catch (error) {
       console.error('加载巡检配置失败:', error)
     } finally {
@@ -112,7 +103,6 @@ export default function SystemSettings() {
       // 后端会做类型归一（比如 min_interval_hours 的 0 语义），
       // 不回填会出现「页面显示的和实际生效的不一致」。
       checkForm.setFieldsValue(res.config || {})
-      setCheckMode(res.config?.mode || 'probe')
     } catch (error) {
       console.error('保存巡检配置失败:', error)
     } finally {
@@ -312,25 +302,27 @@ export default function SystemSettings() {
           <Divider style={{ margin: '20px 0 16px' }} />
 
           <Alert
-            type={checkMode === 'inference' ? 'warning' : 'info'}
+            type="success"
             showIcon
-            message={
-              checkMode === 'inference'
-                ? '当前为真实推理模式，每次探测都会消耗账号额度'
-                : '当前为零额度探测，不消耗账号额度'
-            }
+            message="巡检不消耗账号额度"
             description={
               <div style={{ fontSize: 13, lineHeight: 1.8 }}>
                 巡检定期探测账号池里的 key 是否还能用，失效的会自动标记，
                 避免用户提取到废号。
                 <br />
-                零额度探测只验证「认证是否通过」，不发起推理；真实推理模式每次约消耗
-                317 tokens，按 1000 个账号每 6 小时一轮算，一天约 127 万 tokens。
+                探测只发一个空请求来验证「认证是否通过」，不会触发模型推理，
+                因此<Text strong>不产生任何 token 消耗</Text>。
+                同时会识别额度耗尽、订阅过期这类响应并判为失效。
                 <br />
                 <Text type="secondary">
                   网络抖动、限流、服务端 5xx 都会被判成「无法判定」而不是失效，
                   且需要连续失败达到阈值才会真的标记失效 —— 这是为了避免一次网络故障
                   把整池账号误标废。
+                </Text>
+                <br />
+                <Text type="secondary">
+                  局限：探测确认的是「认证通过」，不等于「一定能跑出结果」。
+                  若需确认推理能力，请人工挑一把 key 单独调用验证。
                 </Text>
               </div>
             }
@@ -341,20 +333,12 @@ export default function SystemSettings() {
             form={checkForm}
             onFinish={handleSaveCheckConfig}
             layout="vertical"
-            onValuesChange={(changed) => {
-              // mode 变了要立刻更新上方提示的措辞，否则用户改成 inference
-              // 后仍看到「不消耗额度」，那是明确的误导
-              if ('mode' in changed) setCheckMode(changed.mode)
-            }}
           >
             {Object.entries(checkSchema).map(([key, meta]) => {
               const label = (
                 <Space size={6}>
                   <span>{CHECK_LABELS[key] || key}</span>
                   <Text type="secondary" style={{ fontSize: 12 }}>({key})</Text>
-                  {key === 'mode' && checkMode === 'inference' && (
-                    <Tag color="orange" style={{ marginInlineEnd: 0 }}>消耗额度</Tag>
-                  )}
                 </Space>
               )
               const extra = CHECK_HINTS[key] || meta.desc
@@ -373,13 +357,14 @@ export default function SystemSettings() {
                 )
               }
 
+              // 枚举型配置（后端 schema 带 choices）。目前没有这类项，
+              // 分支留着是为了以后加配置时前端不用改。
               if (meta.choices) {
                 return (
                   <Form.Item key={key} label={label} name={key} extra={extra}>
                     <Select
                       style={{ maxWidth: 280 }}
-                      options={key === 'mode' ? MODE_OPTIONS
-                        : meta.choices.map(c => ({ value: c, label: c }))}
+                      options={meta.choices.map(c => ({ value: c, label: c }))}
                     />
                   </Form.Item>
                 )
