@@ -34,81 +34,42 @@ from _bootstrap import ROOT  # noqa: E402,F401  （副作用：把仓库根加�
 
 import requests  # noqa: E402
 
-from src import config  # noqa: E402
+from src import config, keycheck  # noqa: E402
 from src.ledger import Ledger  # noqa: E402
 
-#: 验收用的 API 端点。从 .env 读，不写死域名（同 config 里其它站点标识的理由）。
-API_URL = os.getenv("VERIFY_API_URL", "")
+#: 验收用的 API 端点。
+#: 优先环境变量，其次 `config.VERIFY_API_URL`（那个有内置默认值，
+#: 且能被 Web 端「站点配置」页覆盖）。
+API_URL = os.getenv("VERIFY_API_URL", "") or config.VERIFY_API_URL
 
-PROBE_BODY = {
-    "state": "The build has been failing on CI for three days and the release is tomorrow.",
-    "model": "jev-latest",
-    "questions": {
-        "is_urgent": {"type": "noul",
-                      "instructions": "Does this message convey urgency or time-sensitivity?"},
-    },
-}
+#: 探测请求体的真源在 `src/keycheck.py` —— 这里只是给日志/报告引用。
+PROBE_BODY = keycheck.PROBE_BODY
 
 
 def verify(key: str, *, timeout: float = 90.0, retries: int = 2) -> dict:
-    """验证一把 key 是否可用。
+    """验证一把 key 是否可用。返回 dict（保持本工具原有的调用形态）。
 
-    🔴 **网络层失败必须重试**，不能直接判成"不可用" —— 它与"key 失效"是
-    两类完全不同的失败，混在一起的后果是**交付清单静默缩水**：
+    🔴 判据本身已抽到 `src/keycheck.py` —— 账号池的定时巡检也要用同一套规则，
+       两份实现迟早漂移，而漂移的表现是"命令行验收说可用、页面巡检说失效"，
+       没人能判断该信哪个。这里只做 dict 适配。
 
-      · `status == 0`（**没拿到 HTTP 响应**：SSL 抖动 / DNS / 连接被拒）
-        ⇒ key 很可能是**好的**，只是这一刻网络不行；
-      · `status == 401/403`（站点**明确拒绝**）⇒ key 真的失效。
-
-    本工具**只把 `ok` 的行写进 `keys.txt` / `apikeys.txt`** ⇒ 一次瞬时抖动就会让
-    一把**可用**的 key 从交付物里消失；而屏幕上打印的只是「可用 880 / 不可用 1」、
-    退出码 1，**看起来只是"有一把坏了"**，没人会去追。
-
-    **实测（2026-09-22 第 3 批验收）**：报 1 把不可用，`SSLError`、`elapsed = 0.096s`
-    （⇒ 连接**立即失败**，不是超时）⇒ 手工复验**第 1 次就 200**。那把 key 完全可用。
-
-    ⇒ 判据是「**有没有拿到 HTTP 响应**」，不是「成功还是失败」。
-      有响应 ⇒ 确定性结论，**不重试**（401 重试一万次还是 401，只会浪费时间）。
+    `keycheck` 是**三态**（alive / dead / unknown），而本工具的交付清单只需要
+    二态。映射时 `unknown` 归到"不可用"，但 `verdict` 字段会一并写进
+    `keys_verified.json` ⇒ 事后能区分"真失效"与"当时读不出来"。
     """
     if not API_URL:
         # 空地址会让 requests 抛 MissingSchema，错误信息指不出真因 ⇒ 显式拦。
+        # 这里仍然 SystemExit：命令行工具缺配置就该立刻停，不是每把 key 报一次。
         raise SystemExit(
-            "✗ 未配置 VERIFY_API_URL —— 无法验收 key。\n"
-            "  修法：在 .env 里填入验收端点（形如 https://api.example.com/v1/xxx）"
+            "✗ 未配置验收端点 —— 无法验收 key。\n"
+            "  修法：设环境变量 VERIFY_API_URL，或在 Web 端「系统设置 → 站点配置」里填。"
         )
 
-    t0 = time.time()
-    last: dict = {"ok": False, "status": 0, "error": "未执行", "elapsed": 0.0}
-    for attempt in range(retries + 1):
-        try:
-            r = requests.post(API_URL,
-                              headers={"Authorization": f"Bearer {key}",
-                                       "Content-Type": "application/json"},
-                              json=PROBE_BODY, timeout=timeout)
-        except requests.RequestException as exc:
-            # 网络层 ⇒ 可重试
-            last = {"ok": False, "status": 0,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "elapsed": time.time() - t0, "attempts": attempt + 1}
-            if attempt < retries:
-                time.sleep(1.0 * (attempt + 1))     # 线性退避 1s / 2s
-                continue
-            return last
-        el = time.time() - t0
-        try:
-            body = r.json()
-        except ValueError:
-            body = {"raw": r.text[:200]}
-        if r.status_code == 200 and "answers" in body:
-            return {"ok": True, "status": 200, "model": body.get("model", ""),
-                    "noul": (body.get("answers", {}).get("is_urgent", {}) or {}).get("noul"),
-                    "usage": body.get("usage", {}), "elapsed": el,
-                    "attempts": attempt + 1}
-        err = body.get("error") or body.get("code") or str(body)[:160]
-        # 拿到了 HTTP 响应 ⇒ 确定性结论，**不重试**
-        return {"ok": False, "status": r.status_code, "error": str(err)[:200],
-                "elapsed": el, "attempts": attempt + 1}
-    return last
+    res = keycheck.check_key(key, api_url=API_URL, timeout=timeout, retries=retries)
+    out = res.to_dict()
+    # `noul` 是本工具特有的展示字段，keycheck 不关心它 ⇒ 这里补一次
+    out.setdefault("noul", None)
+    return out
 
 
 def main() -> int:

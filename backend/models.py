@@ -273,6 +273,33 @@ class Account(db.Model):
 
     remarks = db.Column(db.Text)
 
+    # ── 巡检验活 ──────────────────────────────────────────────────────
+    #: 上次巡检时间。**建索引**：巡检按"最久没检查过的优先"取，
+    #: 排序走 `ORDER BY last_checked_at ASC`（SQLite 里 NULL 排最前，
+    #: 正好让从未检查过的账号先被检查）。
+    last_checked_at = db.Column(db.DateTime, index=True)
+
+    #: 最近一次巡检结论：alive / dead / unknown（见 src/keycheck.py）。
+    #: 🔴 与 `status` 是两个维度，不要混：
+    #:    · `status` 是**账号池的分配状态**（available/assigned/invalid）
+    #:    · `check_status` 是**最近一次探测的结果**
+    #:    一个 assigned 的账号也可以被巡检，结论是 dead 也不该改 status
+    #:    （它已经发给用户了，改成 invalid 会让统计数字对不上）。
+    check_status = db.Column(db.String(20), index=True)
+
+    #: 最近一次巡检的错误文本（含 HTTP 状态码），便于人工判断。
+    check_error = db.Column(db.Text)
+
+    #: **连续**判死次数。
+    #: 🔴 只有 `dead` 才累加，`alive` 归零，`unknown` **保持不变** ——
+    #:    这是整套巡检最关键的一条规则。unknown 意味着"这一刻读不出来"
+    #:    （网络抖动、5xx、限流），把它当 dead 累加的后果是：一次网络故障
+    #:    就能把整池账号推过阈值标成失效，而账号早已发给用户，不可逆。
+    fail_streak = db.Column(db.Integer, default=0, nullable=False)
+
+    #: 累计巡检次数（含 unknown）。用于判断"这条记录是否真的被检查过"。
+    checked_count = db.Column(db.Integer, default=0, nullable=False)
+
     card = db.relationship("CardKey", backref="accounts")
 
     def to_dict(self, include_secret=True):
@@ -287,6 +314,12 @@ class Account(db.Model):
             "assigned_at": self.assigned_at.isoformat() if self.assigned_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "remarks": self.remarks,
+            # 巡检信息
+            "last_checked_at": self.last_checked_at.isoformat() if self.last_checked_at else None,
+            "check_status": self.check_status,
+            "check_error": self.check_error,
+            "fail_streak": self.fail_streak or 0,
+            "checked_count": self.checked_count or 0,
         }
 
         if include_secret:
@@ -297,6 +330,50 @@ class Account(db.Model):
             })
 
         return data
+
+    def apply_check(self, verdict: str, *, error: str = "",
+                    dead_threshold: int = 2, checked_at=None) -> bool:
+        """把一次巡检结果落到本记录上。返回**是否刚被判定为失效**。
+
+        规则（三态各自的处置完全不同，这是本方法存在的理由）：
+          · alive   → fail_streak 归零；若此前被巡检标成 invalid 则**自动恢复**
+          · dead    → fail_streak += 1；达到阈值且当前可分配时才标 invalid
+          · unknown → 只更新时间与错误文本，**不动 fail_streak、不动 status**
+
+        `dead_threshold` 默认 2：连续两轮都拿到 401/403 才判死。
+        设 1 也合理（401 本身是确定性结论），但留个余量能挡住
+        "站点短时间返回错误状态码"这类异常。
+        """
+        now = checked_at or datetime.utcnow()
+        self.last_checked_at = now
+        self.check_status = verdict
+        self.check_error = (error or "")[:1000] or None
+        self.checked_count = (self.checked_count or 0) + 1
+
+        if verdict == "alive":
+            self.fail_streak = 0
+            # 🔴 自动恢复：只恢复**之前被巡检判死**的账号（remarks 有标记），
+            #    不碰管理员手工标失效的 —— 那是人的决定，不该被自动覆盖。
+            if self.status == "invalid" and (self.remarks or "").find("[巡检判定失效]") >= 0:
+                self.status = "available"
+                self.remarks = (self.remarks or "").replace("[巡检判定失效]", "[巡检已恢复]")
+            return False
+
+        if verdict == "dead":
+            self.fail_streak = (self.fail_streak or 0) + 1
+            # 只对**还在池子里待分配**的账号改 status。
+            # assigned 的已经发给用户了，改 invalid 会让"已提取"统计凭空减少，
+            # 而账号在用户手里是什么状态我们管不了 —— 只记录结论，不改状态。
+            if self.fail_streak >= dead_threshold and self.status == "available":
+                self.status = "invalid"
+                mark = "[巡检判定失效]"
+                if mark not in (self.remarks or ""):
+                    self.remarks = f"{mark} {self.remarks or ''}".strip()
+                return True
+            return False
+
+        # unknown：什么都不改（除了上面的时间/错误文本）
+        return False
 
 
 class SystemConfig(db.Model):
@@ -344,7 +421,12 @@ class OperationLog(db.Model):
     __tablename__ = "operation_logs"
 
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    #: 🔴 可为空：**系统自动触发**的操作没有归属用户（定时巡检、任务完成回写）。
+    #:    以前这里是 nullable=False，导致定时巡检写日志时抛
+    #:    `IntegrityError: NOT NULL constraint failed` —— 而那是在后台线程里，
+    #:    异常被兜住后只表现为"日志里没有巡检记录"，看不出发生了什么。
+    #:    `to_dict()` 里 user_id 为空时 username 返回「系统」。
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     action = db.Column(db.String(50), nullable=False)
     resource_type = db.Column(db.String(50))
     resource_id = db.Column(db.Integer)
@@ -359,7 +441,10 @@ class OperationLog(db.Model):
         return {
             "id": self.id,
             "user_id": self.user_id,
-            "username": self.user.username if self.user else None,
+            # user_id 为空 = 系统自动触发（定时巡检等）。
+            # 返回「系统」而不是 null，否则前端表格里那一列是空白，
+            # 看起来像数据丢了。
+            "username": self.user.username if self.user else ("系统" if self.user_id is None else None),
             "action": self.action,
             "resource_type": self.resource_type,
             "resource_id": self.resource_id,

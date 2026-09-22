@@ -37,6 +37,14 @@ def run_migrations():
             "moemail_expiry_ms": "INTEGER DEFAULT 86400000",
             "moemail_poll_interval": "FLOAT DEFAULT 3.0",
         },
+        "accounts": {
+            # 巡检验活。见 backend/models.py 的 Account.apply_check()
+            "last_checked_at": "DATETIME",
+            "check_status": "VARCHAR(20)",
+            "check_error": "TEXT",
+            "fail_streak": "INTEGER NOT NULL DEFAULT 0",
+            "checked_count": "INTEGER NOT NULL DEFAULT 0",
+        },
     }
 
     added_all = {}
@@ -61,10 +69,60 @@ def run_migrations():
             "WHERE status = 'used' AND extracted_count = 0"
         ))
 
+    # 🔴 SQLite **不支持**用 ALTER TABLE 去掉 NOT NULL 约束 ⇒ 只能重建表。
+    #    这里要放开 `operation_logs.user_id`：系统自动触发的操作（定时巡检、
+    #    任务完成回写）没有归属用户，非空约束会让写日志抛 IntegrityError，
+    #    而那发生在后台线程里，只表现为"日志里缺记录"，极难定位。
+    if "operation_logs" in tables:
+        uid_col = next((c for c in inspector.get_columns("operation_logs")
+                        if c["name"] == "user_id"), None)
+        if uid_col is not None and not uid_col.get("nullable", True):
+            db.session.execute(text("""
+                CREATE TABLE operation_logs_new (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    user_id INTEGER,
+                    action VARCHAR(50) NOT NULL,
+                    resource_type VARCHAR(50),
+                    resource_id INTEGER,
+                    details TEXT,
+                    ip_address VARCHAR(50),
+                    created_at DATETIME NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES users (id)
+                )
+            """))
+            db.session.execute(text(
+                "INSERT INTO operation_logs_new "
+                "SELECT id, user_id, action, resource_type, resource_id, "
+                "       details, ip_address, created_at FROM operation_logs"))
+            db.session.execute(text("DROP TABLE operation_logs"))
+            db.session.execute(text(
+                "ALTER TABLE operation_logs_new RENAME TO operation_logs"))
+            db.session.commit()
+            print("[OK] 数据库迁移完成，operation_logs.user_id 已放开非空约束")
+
+    # 🔴 `ALTER TABLE ADD COLUMN` **不会**建索引 —— 模型里写的 `index=True`
+    #    只在 `create_all()` 建新表时生效。已存在的表补了列却没索引，
+    #    表现是"账号多了以后巡检查询变慢"，而且不报错、很难联想到索引缺失。
+    #    这里显式补，`IF NOT EXISTS` 保证可重复执行。
+    for idx_name, table, column in (
+        ("ix_accounts_last_checked_at", "accounts", "last_checked_at"),
+        ("ix_accounts_check_status", "accounts", "check_status"),
+    ):
+        if table not in tables:
+            continue
+        cols = {c["name"] for c in inspector.get_columns(table)} | set(
+            added_all.get(table, []))
+        if column in cols:
+            db.session.execute(text(
+                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({column})"))
+
     if added_all:
         db.session.commit()
         for table, cols in added_all.items():
             print(f"[OK] 数据库迁移完成，{table} 新增列: {', '.join(cols)}")
+    else:
+        # 没加列也可能补了索引 ⇒ 仍要提交
+        db.session.commit()
 
 
 def create_app():
