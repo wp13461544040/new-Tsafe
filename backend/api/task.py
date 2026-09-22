@@ -8,6 +8,7 @@ from sqlalchemy import func
 from backend.executor import request_cancel, start_task
 from backend.mailfactory import MailConfigError, build_mail_client
 from backend.models import db, RegisterTask, MailConfig, User, OperationLog
+from src import config as site_config
 
 bp = Blueprint("task", __name__)
 
@@ -127,9 +128,20 @@ def create_task():
     db.session.add(log)
     db.session.commit()
     
-    # 🔴 邮箱配置在**起线程之前**先校验一遍：配置不完整就别浪费一次线程启动，
+    # 🔴 两项配置都在**起线程之前**校验：不完整就别浪费一次线程启动，
     #    更重要的是错误能当场回给用户，而不是让任务静默变成 failed
     #    然后用户去列表里翻 error_message。
+    from backend.api.system import load_site_config_from_db
+    load_site_config_from_db()
+
+    if missing_site := site_config.validate_site():
+        msg = (f"站点配置不完整，缺少：{'、'.join(missing_site)}。"
+               f"请到「系统设置 → 站点配置」补全")
+        task.status = "failed"
+        task.error_message = msg
+        db.session.commit()
+        return jsonify({"error": msg}), 400
+
     try:
         build_mail_client(mail_config)
     except MailConfigError as exc:

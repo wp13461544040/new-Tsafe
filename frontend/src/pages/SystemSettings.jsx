@@ -1,12 +1,21 @@
 import { useEffect, useState } from 'react'
-import { Card, Form, Input, Button, message, Table, Tabs } from 'antd'
-import { getSystemConfig, updateSystemConfig, getOperationLogs } from '../api'
+import { Card, Form, Input, Button, message, Table, Tabs, Alert, Space, Tag, Typography } from 'antd'
+import { ReloadOutlined } from '@ant-design/icons'
+import {
+  getSystemConfig, updateSystemConfig, getOperationLogs,
+  getSiteConfig, updateSiteConfig
+} from '../api'
 import dayjs from 'dayjs'
 
 const { TextArea } = Input
+const { Text } = Typography
 
 export default function SystemSettings() {
   const [announcementForm] = Form.useForm()
+  const [siteForm] = Form.useForm()
+  const [siteFields, setSiteFields] = useState([])
+  const [siteLoading, setSiteLoading] = useState(false)
+  const [siteSaving, setSiteSaving] = useState(false)
   const [logs, setLogs] = useState([])
   const [logsLoading, setLogsLoading] = useState(false)
   const [saveLoading, setSaveLoading] = useState(false)
@@ -14,8 +23,41 @@ export default function SystemSettings() {
 
   useEffect(() => {
     loadAnnouncement()
+    loadSiteConfig()
+  }, [])
+
+  useEffect(() => {
     loadLogs()
   }, [pagination.current])
+
+  const loadSiteConfig = async () => {
+    setSiteLoading(true)
+    try {
+      const res = await getSiteConfig()
+      setSiteFields(res.fields || [])
+      // 表单只回填数据库里存的值；留空意为"沿用 .env"，不要用 active 填满
+      const init = {}
+      for (const f of res.fields || []) init[f.key] = f.value
+      siteForm.setFieldsValue(init)
+    } catch (error) {
+      console.error('加载站点配置失败:', error)
+    } finally {
+      setSiteLoading(false)
+    }
+  }
+
+  const handleSaveSiteConfig = async (values) => {
+    setSiteSaving(true)
+    try {
+      const res = await updateSiteConfig(values)
+      message.success(res.message || '已保存并生效')
+      loadSiteConfig()
+    } catch (error) {
+      console.error('保存站点配置失败:', error)
+    } finally {
+      setSiteSaving(false)
+    }
+  }
 
   const loadAnnouncement = async () => {
     try {
@@ -70,7 +112,13 @@ export default function SystemSettings() {
     toggle_mail_config: '切换邮箱状态',
     delete_mail_config: '删除邮箱配置',
     change_password: '修改密码',
-    update_config: '更新系统配置'
+    update_config: '更新系统配置',
+    update_site_config: '更新站点配置',
+    import_cards: '导入卡密',
+    update_card: '更新卡密',
+    import_accounts: '导入账号',
+    delete_account: '删除账号',
+    task_finished: '任务完成'
   }
 
   const logColumns = [
@@ -103,7 +151,78 @@ export default function SystemSettings() {
     }
   ]
 
+  // 缺了必填项就提示 —— 跑批会被拦下，不如在这里先说清
+  const missingRequired = siteFields.filter(f => f.required && !f.active)
+
   const items = [
+    {
+      key: 'site',
+      label: '站点配置',
+      children: (
+        <Card loading={siteLoading}>
+          <Alert
+            type={missingRequired.length ? 'warning' : 'info'}
+            showIcon
+            message={
+              missingRequired.length
+                ? `还有 ${missingRequired.length} 项必填未配置，注册任务会被拦下`
+                : '站点配置已就绪'
+            }
+            description={
+              <div style={{ fontSize: 13, lineHeight: 1.8 }}>
+                这些是注册任务实际使用的目标站点参数，保存后**立即生效**，不需要重启服务。
+                <br />
+                留空的项会回落到 <Text code>.env</Text> 里的同名变量（命令行入口用的就是那份）。
+              </div>
+            }
+            style={{ marginBottom: 20 }}
+          />
+
+          <Form form={siteForm} onFinish={handleSaveSiteConfig} layout="vertical">
+            {siteFields.map(f => (
+              <Form.Item
+                key={f.key}
+                label={
+                  <Space size={6}>
+                    <span>{f.label}</span>
+                    <Text type="secondary" style={{ fontSize: 12 }}>({f.key})</Text>
+                    {f.required && <Tag color="red" style={{ marginInlineEnd: 0 }}>必填</Tag>}
+                  </Space>
+                }
+                name={f.key}
+                extra={
+                  <div style={{ fontSize: 12 }}>
+                    <div>{f.hint}</div>
+                    <div style={{ marginTop: 4 }}>
+                      当前生效：
+                      {f.active
+                        ? <Text code>{f.active}</Text>
+                        : <Text type="danger">未配置</Text>}
+                      {!f.value && f.env && (
+                        <Text type="secondary">（来自 .env）</Text>
+                      )}
+                    </div>
+                  </div>
+                }
+              >
+                <Input placeholder={f.placeholder} allowClear />
+              </Form.Item>
+            ))}
+
+            <Form.Item style={{ marginBottom: 0 }}>
+              <Space>
+                <Button type="primary" htmlType="submit" loading={siteSaving}>
+                  保存并生效
+                </Button>
+                <Button icon={<ReloadOutlined />} onClick={loadSiteConfig}>
+                  重新加载
+                </Button>
+              </Space>
+            </Form.Item>
+          </Form>
+        </Card>
+      )
+    },
     {
       key: 'announcement',
       label: '公告配置',

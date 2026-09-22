@@ -1,4 +1,4 @@
-"""收件过滤规则表 —— TypeSafe 侧。
+﻿"""收件过滤规则表 —— TypeSafe 侧。
 
 格式对齐同机 OpenXLab 项目的做法（`sender_contains="openxlab"`）：
 **信封发件人子串做第一道过滤，主题子串做第二道。**
@@ -58,12 +58,24 @@ from typing import Any, Iterable
 
 from . import config
 
-# ── 发件人域常量（改这里就够了，不要在规则里散落字符串） ───────────────
+# ── 发件人域（唯一入口，不要在规则里散落字符串）─────────────────────────
 # 目标站点全部邮件流量的信封域都以此结尾（各子域如 em* / pm-bounces* 都覆盖）。
-# 🔴 从 `config.SENDER_DOMAIN`（.env）读，**不在这里写死域名** ——
-#    写死等于把目标站点标识提交进仓库。缺失时由 `config.validate_site()` 报出来，
-#    不在这里兜默认值：兜了会让规则静默匹配不到任何邮件，表现是"永远等不到信"。
-SENDER_TYPESAFE = config.SENDER_DOMAIN
+#
+# 🔴 做成**函数**而不是模块级常量（2026-09-22 改）：常量会在 import 时求值，
+#    于是 Web 页面改完站点配置后规则表仍用旧域名 —— 不报错，只是永远匹配不到。
+#    缺失时不兜默认值：兜了同样是静默匹配不到，还更难查。
+def sender_domain() -> str:
+    """当前生效的发件人域。来源见 `config.SENDER_DOMAIN`（.env 或页面注入）。"""
+    return config.SENDER_DOMAIN
+
+
+def invalidate_sender_cache() -> None:
+    """占位钩子：本模块改成运行时读取后已无缓存可失效。
+
+    保留它是为了让 `config.apply_site_config()` 的调用点保持对称 ——
+    哪天这里又加了缓存（比如预归一化的发件域），忘了失效就是同一个坑。
+    """
+    return None
 #
 # ⚠️ 这里曾有一个指向营销流子域的 `SENDER_UPDATES` 常量，
 # 2026-09-21 随邀请制取消一并删除 —— 它只被 `waitlist_confirm` /
@@ -73,7 +85,7 @@ SENDER_TYPESAFE = config.SENDER_DOMAIN
 # ⚠️ 更早还删过一个 `SENDER_TRANSACTIONAL = ("em", "pm-bounces")`，零引用。
 # 那条的教训仍然适用：**注释声称的分层必须在代码里真的落地**，
 # 否则下一个按注释理解的人会以为"事务流只匹配 `em*`/`pm-bounces*`"，实际匹配整个域。
-# 现在只剩一类流量，按域匹配（`SENDER_TYPESAFE`）就够，不需要再分层。
+# 现在只剩一类流量，按域匹配（`sender_domain()`）就够，不需要再分层。
 
 
 def _norm(s: str) -> str:
@@ -96,15 +108,29 @@ class MailRule:
 
     name: str
     stage: str
-    sender_contains: str
     subject_contains: str
+    #: 发件人子串。**留空（默认）= 用当前配置的发件域**。
+    #:
+    #: 🔴 为什么不在规则表里直接写 `sender_contains=config.SENDER_DOMAIN`
+    #:    （2026-09-22 改）：`RULES` 是模块级元组，在 import 那一刻求值 ⇒
+    #:    域名被烧进规则里。Web 管理端把站点配置搬到页面后，
+    #:    `config.apply_site_config()` 改了全局变量而规则表还是旧域名 ⇒
+    #:    页面上改完不生效，且不报错（只是永远匹配不到邮件，
+    #:    表现成"一直等不到信"，排查方向会直接跑偏到邮箱服务上）。
+    sender_contains: str = ""
     subject_excludes: tuple[str, ...] = ()
     note: str = ""
+
+    @property
+    def effective_sender(self) -> str:
+        """实际用于匹配的发件人子串（规则未指定时取当前配置）。"""
+        return self.sender_contains or sender_domain()
 
     def matches(self, mail: Any) -> bool:
         sender = _norm(getattr(mail, "sender", "") or "")
         subject = _norm(getattr(mail, "subject", "") or "")
-        if self.sender_contains and _norm(self.sender_contains) not in sender:
+        want_sender = self.effective_sender
+        if want_sender and _norm(want_sender) not in sender:
             return False
         if self.subject_contains and _norm(self.subject_contains) not in subject:
             return False
@@ -127,7 +153,6 @@ RULES: tuple[MailRule, ...] = (
     MailRule(
         name="welcome_confirm",
         stage="1-signup",
-        sender_contains=SENDER_TYPESAFE,
         subject_contains="confirm your email",
         note="🔴 **主路径的唯一凭据来源**（2026-09-21 起）。"
              "`POST /login` 提交邮箱后站点直接回这封 —— 不再需要先申请、再等获批。"
@@ -138,7 +163,6 @@ RULES: tuple[MailRule, ...] = (
     MailRule(
         name="signin_code",
         stage="2-login",
-        sender_contains=SENDER_TYPESAFE,
         subject_contains="sign-in code",
         note="6 位登录验证码，10 分钟有效、一次性。"
              "由 `/login` 的「Email me a code instead」分支（ACTION_3）触发。",
@@ -146,7 +170,6 @@ RULES: tuple[MailRule, ...] = (
     MailRule(
         name="signin_link",
         stage="2-login",
-        sender_contains=SENDER_TYPESAFE,
         subject_contains="sign in to typesafe",
         note="Stytch 登录魔法链接（由 /login 的 ACTION_2 触发）。"
              "与 welcome_confirm 都是魔法链接，但**触发源不同**："
@@ -155,7 +178,6 @@ RULES: tuple[MailRule, ...] = (
     MailRule(
         name="verify_code",
         stage="2-login",
-        sender_contains=SENDER_TYPESAFE,
         subject_contains="verification code",
         note="6 位验证码的另一种文案。与 signin_code 分开是为了日志可读；"
              "取码时两者都要收。",
@@ -254,9 +276,14 @@ def any_of(*rules: MailRule):
 
 
 # ── 分诊断用的谓词 ────────────────────────────────────────────────────
-def sender_ok(mail: Any, sender_contains: str = SENDER_TYPESAFE) -> bool:
-    """只看发件人。用来把"不是我们的邮件"与"是我们的但主题不认识"分开。"""
-    return _norm(sender_contains) in _norm(getattr(mail, "sender", "") or "")
+def sender_ok(mail: Any, sender_contains: str = "") -> bool:
+    """只看发件人。用来把"不是我们的邮件"与"是我们的但主题不认识"分开。
+
+    ⚠️ 默认值必须是 `""` 而不是 `sender_domain()` —— Python 的默认参数在
+    **函数定义时**求值一次，写成后者等于又回到"import 时固定"那个坑。
+    """
+    want = sender_contains or sender_domain()
+    return _norm(want) in _norm(getattr(mail, "sender", "") or "")
 
 
 def subject_ok(mail: Any, subject_contains: str) -> bool:

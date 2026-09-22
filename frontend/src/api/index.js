@@ -48,3 +48,7 @@ export const getSystemConfig = (key) => request.get('/system/config', { params: 
 export const updateSystemConfig = (data) => request.post('/system/config', data)
 export const getSystemConfigs = () => request.get('/system/configs')
 export const getOperationLogs = (params) => request.get('/system/logs', { params })
+
+// 站点配置（目标站点地址、发件域等，跑批时用）
+export const getSiteConfig = () => request.get('/system/site-config')
+export const updateSiteConfig = (data) => request.post('/system/site-config', data)

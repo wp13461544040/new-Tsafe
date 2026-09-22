@@ -1,9 +1,13 @@
 """系统管理 API"""
+import os
 from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import func
 from backend.models import db, User, CardKey, RegisterTask, MailConfig, OperationLog, SystemConfig
+# 注册器侧的配置模块 —— 站点配置的**真源**是它的模块级变量（跑批时读的就是那些）。
+# 这里用别名，避免与 `backend.config` 混淆。
+from src import config as site_config
 
 bp = Blueprint("system", __name__)
 
@@ -11,6 +15,16 @@ bp = Blueprint("system", __name__)
 def get_current_user_id():
     """获取当前用户ID（转为整数）"""
     return int(get_jwt_identity())
+
+
+def check_admin():
+    """当前用户是否管理员。
+
+    本文件里这段判断原本逐个端点内联了 8 次 —— 抽成函数是为了新增端点时
+    不会漏掉（漏掉就是一个无鉴权的管理接口，而且不会有任何报错）。
+    """
+    user = User.query.get(get_current_user_id())
+    return user is not None and user.role == "admin"
 
 
 @bp.route("/users", methods=["GET"])
@@ -229,6 +243,141 @@ def cleanup():
         "message": f"已清理 {deleted_logs} 条日志",
         "deleted_logs": deleted_logs
     })
+
+
+#: 站点配置的字段说明（顺序即页面展示顺序）。
+#: 字段名清单由 `src.config.SITE_CONFIG_KEYS` 提供，这里只补 UI 用的元信息。
+SITE_FIELD_META = {
+    "SITE_ORIGIN": {
+        "label": "控制台地址",
+        "placeholder": "https://console.example.com",
+        "hint": "目标站点的根地址，不要带尾部斜杠（保存时会自动去掉）",
+        "required": True,
+    },
+    "STYTCH_LOGIN_HOST": {
+        "label": "登录服务地址",
+        "placeholder": "https://login.example.com",
+        "hint": "魔法链接的落地域。填错会导致链接提取不到，表现成「等不到邮件」",
+        "required": True,
+    },
+    "SENDER_DOMAIN": {
+        "label": "验证邮件发件域",
+        "placeholder": "example.com",
+        "hint": "信封发件人以它结尾的邮件才会被收信规则匹配。填错同样表现为等不到信",
+        "required": True,
+    },
+    "VERIFY_API_URL": {
+        "label": "Key 验收端点",
+        "placeholder": "https://api.example.com/v1/xxx",
+        "hint": "仅 tools/verify_keys.py 用，不影响注册跑批",
+        "required": False,
+    },
+}
+
+
+@bp.route("/site-config", methods=["GET"])
+@jwt_required()
+def get_site_config():
+    """读站点配置。
+
+    返回三层信息，让页面能说清"这个值从哪来"：
+      · value    数据库里存的（页面填的）
+      · env      .env 里的（命令行入口用的）
+      · active   当前进程实际生效的
+    """
+    if not check_admin():
+        return jsonify({"error": "无权限"}), 403
+
+    active = site_config.current_site_config()
+    fields = []
+
+    for key in site_config.SITE_CONFIG_KEYS:
+        meta = SITE_FIELD_META.get(key, {})
+        fields.append({
+            "key": key,
+            "value": SystemConfig.get_value(f"site.{key}", "") or "",
+            # 进程启动时从 .env 读到的原始值 —— 页面留空时用的就是它
+            "env": os.getenv(key, ""),
+            "active": active.get(key, ""),
+            "label": meta.get("label", key),
+            "placeholder": meta.get("placeholder", ""),
+            "hint": meta.get("hint", ""),
+            "required": meta.get("required", False),
+        })
+
+    return jsonify({"fields": fields})
+
+
+@bp.route("/site-config", methods=["POST", "PUT"])
+@jwt_required()
+def set_site_config():
+    """写站点配置并**立即注入当前进程**。
+
+    🔴 写库之后必须调 `apply_site_config()`：跑批用的是 `src.config` 的模块级
+    变量，只写库不注入的表现是"页面上改了、列表里也显示新值，但跑批还是旧域名"
+    —— 而且不报错。
+    """
+    if not check_admin():
+        return jsonify({"error": "无权限"}), 403
+
+    data = request.get_json() or {}
+    user_id = get_current_user_id()
+
+    updated = {}
+    for key in site_config.SITE_CONFIG_KEYS:
+        if key not in data:
+            continue
+
+        val = str(data.get(key) or "").strip()
+
+        # URL 类字段做个基本校验：填成 "console.example.com"（少了协议）
+        # 会让所有请求直接失败，而错误信息只会是 MissingSchema，指不出是配置问题
+        if key in ("SITE_ORIGIN", "STYTCH_LOGIN_HOST", "VERIFY_API_URL") and val:
+            if not val.startswith(("http://", "https://")):
+                return jsonify({
+                    "error": f"{SITE_FIELD_META[key]['label']} 必须以 http:// 或 https:// 开头"
+                }), 400
+            val = val.rstrip("/")
+
+        SystemConfig.set_value(f"site.{key}", val, SITE_FIELD_META.get(key, {}).get("label", key))
+        updated[key] = val
+
+    # 注入当前进程。空值不覆盖（`apply_site_config` 自己会跳过），
+    # 所以页面上清空某项 = 回落到 .env，而不是把生效值清成空。
+    active = site_config.apply_site_config(**updated)
+
+    log = OperationLog(
+        user_id=user_id,
+        action="update_site_config",
+        details=f"更新站点配置: {'、'.join(updated) or '（无变更）'}",
+        ip_address=request.remote_addr,
+    )
+    db.session.add(log)
+    db.session.commit()
+
+    return jsonify({
+        "message": "已保存并生效",
+        "updated": list(updated),
+        "active": active,
+    })
+
+
+def load_site_config_from_db():
+    """把数据库里的站点配置注入进程。
+
+    调用点有两处，缺一不可：
+      · `app.py` 启动时 —— 让命令行/后台线程一开始就用页面配的值
+      · `executor` 跑批前 —— 防止"改了配置但没重启"时用旧值
+    """
+    values = {}
+    for key in site_config.SITE_CONFIG_KEYS:
+        v = SystemConfig.get_value(f"site.{key}", "")
+        if v:
+            values[key] = v
+
+    if values:
+        site_config.apply_site_config(**values)
+    return values
 
 
 @bp.route("/config", methods=["GET"])

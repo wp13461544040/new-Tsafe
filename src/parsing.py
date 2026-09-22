@@ -48,19 +48,33 @@ from . import config
 ACTION_FIELD_RE = re.compile(r'name="\$ACTION_(\d+):(\d+)"\s+value="([^"]*)"')
 ACTION_KEY_RE = re.compile(r'name="\$ACTION_KEY"\s+value="([^"]*)"')
 
-#: 魔法链接落地页 URL（`<STYTCH_LOGIN_HOST>/v1/magic_links/redirect?...`）。
+#: 魔法链接落地页 URL 的正则缓存。
 #:
-#: 🔴 用 `config.STYTCH_LOGIN_HOST` 派生，**不要在这里再写一遍域名**。
-#: 2026-09-20 二轮审计发现：该常量当时**零引用**，而同一个 URL 在
-#: `typesafe.py`（2 处）与两个探针（4 处）里被硬编码 —— 改配置不生效。
-#: 现在生产侧全部收敛到常量；探针仍各自硬编码（探针的定位是
-#: "一次性、自包含、随时能删"，见 `docs/audit-2026-09-20-round2.md` §5.4）。
+#: 🔴 **惰性编译**，不在 import 时求值（2026-09-22 改）：
+#:    以前这里是 `MAGIC_LINK_RE = re.compile(re.escape(config.STYTCH_LOGIN_HOST) + ...)`，
+#:    在模块 import 那一刻就把域名烧进了正则。Web 管理端把站点配置搬到页面后，
+#:    `config.apply_site_config()` 改了全局变量，而这个正则**还是旧域名** ⇒
+#:    页面上改完不生效，且不报错（只是永远匹配不到链接，表现成"等不到邮件"）。
 #:
 #: 用 `re.escape` 而不是手写 `\.`：手写容易漏（少一个反斜杠就会匹配
-#: `loginXtypesafeYai`），而且常量一改这里就得跟着改。
-MAGIC_LINK_RE = re.compile(
-    re.escape(config.STYTCH_LOGIN_HOST) + r"/v1/magic_links/redirect\?[^\s\"<>\)\]]+"
-)
+#: `loginXtypesafeYai`）。
+_magic_link_re: re.Pattern[str] | None = None
+
+
+def magic_link_re() -> re.Pattern[str]:
+    """当前配置对应的魔法链接正则（按需编译并缓存）。"""
+    global _magic_link_re
+    if _magic_link_re is None:
+        _magic_link_re = re.compile(
+            re.escape(config.STYTCH_LOGIN_HOST) + r"/v1/magic_links/redirect\?[^\s\"<>\)\]]+"
+        )
+    return _magic_link_re
+
+
+def invalidate_magic_link_re() -> None:
+    """丢弃缓存。由 `config.apply_site_config()` 在改完域名后调用。"""
+    global _magic_link_re
+    _magic_link_re = None
 
 #: 一次性 token 的参数名。判"这条链接完不完整"就看它（**必须带 `=`**）。
 #: 用 `[?&]` 锚定参数名起点，避免被 `public_token=` 里的子串误命中。
@@ -99,7 +113,7 @@ def extract_magic_links(text: str) -> list[str]:
     if not text:
         return []
     seen: dict[str, None] = {}
-    for m in MAGIC_LINK_RE.finditer(text):
+    for m in magic_link_re().finditer(text):
         # 🔴 **必须做 HTML 实体反转义**（2026-09-21 接入 Remail 时实测踩到）：
         #    不同后端给的正文形态不同 —— CF Worker 是纯文本，Remail 是 **HTML**，
         #    后者的链接里 `&` 被转义成 `&amp;`。不还原的话，提取出来的查询串是

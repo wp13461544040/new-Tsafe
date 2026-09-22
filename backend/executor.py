@@ -15,6 +15,7 @@ from datetime import datetime
 
 from backend.mailfactory import MailConfigError, build_mail_client
 from backend.models import MailConfig, OperationLog, RegisterTask, db
+from src import config as site_config
 
 #: `{task_id: threading.Event}` —— 取消信号。
 #: 用 Event 而不是布尔标志：worker 在等邮件时会阻塞，Event 让它能被及时唤醒检查。
@@ -73,6 +74,23 @@ def _run_task(app, task_id: int):
         with app.app_context():
             task = RegisterTask.query.get(task_id)
             if task is None:
+                return
+
+            # 🔴 跑批前重新注入站点配置：用户可能在服务启动之后改过配置，
+            #    而注册器读的是 `src.config` 的模块级变量 ——
+            #    不重新注入的表现是"页面上改了域名，跑批还用旧的"，且不报错。
+            from backend.api.system import load_site_config_from_db
+            load_site_config_from_db()
+
+            missing_site = site_config.validate_site()
+            if missing_site:
+                task.status = "failed"
+                task.error_message = (
+                    f"站点配置不完整，缺少：{'、'.join(missing_site)}。"
+                    f"请到「系统设置 → 站点配置」补全"
+                )
+                task.completed_at = datetime.utcnow()
+                db.session.commit()
                 return
 
             mc = MailConfig.query.get(task.mail_config_id)

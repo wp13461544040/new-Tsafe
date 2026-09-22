@@ -185,6 +185,15 @@ def create_app():
                 "对外提取页面提示文案"
             )
     
+    # 把页面上配的站点配置注入注册器模块。
+    # 🔴 必须在这里做一次：跑批读的是 `src.config` 的模块级变量，
+    #    它们启动时只从 .env 取值 ⇒ 不注入的话页面配的值要等到下次改配置才生效。
+    with app.app_context():
+        from backend.api.system import load_site_config_from_db
+        loaded = load_site_config_from_db()
+        if loaded:
+            print(f"[OK] 已从数据库加载站点配置: {'、'.join(loaded)}")
+
     # 任务跑在进程内线程里 ⇒ 进程重启后数据库里的 running 状态是假的。
     # 不清理的话页面上会永远显示"运行中"，且取消按钮点不动（线程早没了）。
     from backend.executor import recover_stale_tasks

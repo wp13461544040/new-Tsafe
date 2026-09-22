@@ -102,12 +102,69 @@ MOEMAIL_EXPIRY_MS = int(os.getenv("MOEMAIL_EXPIRY_MS", "86400000"))
 # 🔴 不留真实默认值 —— 同 `TEMPMAIL_BASE` 的理由：站点标识写进仓库等于公开
 #    "这个工具在对谁做批量注册"。这类信息单独看不是凭据，但一旦公开就永久公开。
 #
-# 三项都走 .env，缺失由 `validate()` 报出来。
+# 两个来源，**数据库优先**：
+#   · Web 管理端 → 「系统设置」页写入数据库，跑批前由 `executor` 调
+#     `apply_site_config()` 注入（页面改完立即生效，不用重启）
+#   · 命令行入口 → 读 .env（`tools/run_e2e.py` 这类没有数据库的场景）
 SITE_ORIGIN = os.getenv("SITE_ORIGIN", "").rstrip("/")
 SITE_LOGIN = f"{SITE_ORIGIN}/login" if SITE_ORIGIN else ""
 STYTCH_LOGIN_HOST = os.getenv("STYTCH_LOGIN_HOST", "").rstrip("/")
 #: 邮件发件人域（用于 `mailrules` 匹配验证邮件）。
 SENDER_DOMAIN = os.getenv("SENDER_DOMAIN", "")
+
+#: 站点配置的字段名清单 —— 新增字段只改这里，API 与前端都从它派生。
+SITE_CONFIG_KEYS = ("SITE_ORIGIN", "STYTCH_LOGIN_HOST", "SENDER_DOMAIN", "VERIFY_API_URL")
+
+#: key 验收端点（`tools/verify_keys.py` 用）。同样可被页面覆盖。
+VERIFY_API_URL = os.getenv("VERIFY_API_URL", "")
+
+
+def apply_site_config(**values: str) -> dict[str, str]:
+    """运行时覆盖站点配置，返回实际生效的值。
+
+    🔴 为什么需要它：这些常量被 `typesafe.py` 以 `config.SITE_ORIGIN` 形式读取
+    （属性访问 ⇒ 每次求值），所以改本模块的全局变量就能立即生效。
+
+    ⚠️ 但有两处是 **import 时求值**的，改全局变量对它们无效，必须一起重建：
+      · `mailrules` 的规则表（`sender_contains` 曾经在 import 时绑定域名）
+      · `parsing.MAGIC_LINK_RE`（正则在 import 时用 STYTCH_LOGIN_HOST 编译）
+    这两处已分别改成运行时读取 / 惰性编译，本函数负责通知它们失效。
+    忘了这一步的表现是"页面上改了域名却不生效"，而且不报错。
+
+    空值会被忽略（不覆盖）—— 页面上留空意为"沿用 .env"，不是"清成空"。
+    """
+    global SITE_ORIGIN, SITE_LOGIN, STYTCH_LOGIN_HOST, SENDER_DOMAIN, VERIFY_API_URL
+
+    if v := str(values.get("SITE_ORIGIN") or "").strip().rstrip("/"):
+        SITE_ORIGIN = v
+        SITE_LOGIN = f"{v}/login"
+
+    if v := str(values.get("STYTCH_LOGIN_HOST") or "").strip().rstrip("/"):
+        STYTCH_LOGIN_HOST = v
+
+    if v := str(values.get("SENDER_DOMAIN") or "").strip():
+        SENDER_DOMAIN = v
+
+    if v := str(values.get("VERIFY_API_URL") or "").strip():
+        VERIFY_API_URL = v
+
+    # 通知 import 时求值的那两处重建。延迟 import 避免循环依赖
+    # （`parsing` / `mailrules` 都 import 了本模块）。
+    from . import mailrules, parsing
+    parsing.invalidate_magic_link_re()
+    mailrules.invalidate_sender_cache()
+
+    return current_site_config()
+
+
+def current_site_config() -> dict[str, str]:
+    """当前生效的站点配置。"""
+    return {
+        "SITE_ORIGIN": SITE_ORIGIN,
+        "STYTCH_LOGIN_HOST": STYTCH_LOGIN_HOST,
+        "SENDER_DOMAIN": SENDER_DOMAIN,
+        "VERIFY_API_URL": VERIFY_API_URL,
+    }
 
 # ── Framer 表单（waitlist 申请）—— **已于 2026-09-21 整体移除** ─────────
 #
