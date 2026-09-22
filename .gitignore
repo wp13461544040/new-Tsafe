@@ -1,0 +1,82 @@
+# 凭据 —— 用通配，不要逐条列举（`.env.bak-xxx` 这类备份一定漏）
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+venv/
+env/
+ENV/
+
+# Node.js / 前端
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+dist/
+.cache/
+.vite/
+.next/
+out/
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 数据库
+*.db
+*.sqlite
+*.sqlite3
+
+# 运行产物：台账 / 导出 / 探针输出
+*.json
+*.jsonl
+*.csv
+*.log
+exports/
+# 跑批中途传参用的批次时间戳（无源码引用，跑完就没意义）
+.run_ts
+
+# 🔴 成功数据（交付物）：含明文 API Key。
+# 必须显式列目录 —— `*.txt` 没有任何通配规则覆盖，
+# 光靠上面的 *.json / *.jsonl 挡不住 result/keys.txt。
+result/
+
+# 备份 / 回滚点（回填、清污、改配置时都会留一份）
+*.bak
+*.bak-*
+*.orig
+*.rej
+
+# HAR / EML：含会话与令牌（通配已覆盖，这里显式列目录是为了可读）
+*.har
+*.eml
+evidence/
+
+# 工作目录整体排除（过程记录会持续累积，下次顺手回填就漏了）
+.workbuddy-ai/
+
+# 上传文件
+backend/uploads/
+frontend/dist/
+
+# 图片
+*.png

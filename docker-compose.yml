@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: typesafe-backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/data:/app/data
+      - ./exports:/app/exports
+      - ./result:/app/result
+    environment:
+      - FLASK_ENV=production
+      - SECRET_KEY=your-secret-key-change-this-in-production
+    networks:
+      - typesafe-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: typesafe-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - typesafe-network
+
+networks:
+  typesafe-network:
+    driver: bridge
+
+volumes:
+  backend-data:

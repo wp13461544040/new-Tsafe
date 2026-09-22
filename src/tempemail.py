@@ -1,0 +1,194 @@
+"""CF Temp Email Worker 客户端。
+
+关键设计（都是踩过坑换来的）：
+
+- 收信走 **按收件人索引的端点** `/api/inbox?email=`，不走 `/admin/all`（拉最新 N 条再自己筛）。
+  该 Worker 被同机其它项目共用（实测被 OpenXLab 激活邮件刷屏），
+  retention 是"全表 100 个 id 的窗口"，拉列表会把我们的邮件挤出窗口。
+- **5xx 要重试**：那是"服务端现在读不出来"，不是"邮件没到"。4xx 才立刻失败。
+- 每次轮询打了几次接口、其中几次 5xx 都要计数并上报 —— 否则配额类故障只能靠猜。
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass
+from typing import Any, Callable
+
+import requests
+
+from . import config
+
+
+class TempMailError(RuntimeError):
+    pass
+
+
+@dataclass
+class Stats:
+    """只留**真的会被读**的计数器。
+
+    2026-09-20 二轮审计删掉了 `http_4xx` / `created` / `last_error`：三者只写不读。
+    - `http_4xx` / `last_error` 无用是因为失败信息**已经随异常抛出**：
+      4xx 走 `TempMailError(f"HTTP {code} {path}: {body}")`，
+      网络异常与 5xx 走 `TempMailError(f"网络失败 {path}: {exc}")` /
+      `f"邮箱服务持续 5xx（N 次，最近 HTTP {code}）"`。
+      再留一份副本在 `stats` 里没人读，就是"看着像有诊断能力、其实没有"。
+    - `created` 连失败诊断都不参与。
+    保留 `polls` / `http_5xx` 是因为它们出现在 `stages.StageMixin._mail_timeout_msg()`
+    的超时信息里（`邮箱接口轮询 N 次，5xx M 次`）—— 那是"服务端读不出来"与
+    "邮件没到"的唯一分界，而这两件事的处置**恰好相反**（前者修 Worker，后者重跑）。
+    （2026-09-21 之前读它的是已删除的 `stage_apply`；计数器本身没动。）
+    """
+
+    polls: int = 0
+    http_5xx: int = 0
+
+
+@dataclass
+class Mail:
+    id: str
+    to: str
+    sender: str
+    subject: str
+    body: str
+    received_at: int
+
+    @property
+    def recipient(self) -> str:
+        """收件人。`to` 是内置名，用 `recipient` 读起来不歧义。"""
+        return self.to
+
+
+class TempMailClient:
+    def __init__(self, base: str | None = None, admin_key: str | None = None,
+                 session: requests.Session | None = None,
+                 domain: str | None = None):
+        self.base = (base or config.TEMPMAIL_BASE).rstrip("/")
+        self.admin_key = admin_key if admin_key is not None else config.TEMPMAIL_ADMIN_KEY
+        #: 默认建邮箱用的域名。
+        #: 🔴 判 `is not None` 而不是 `or config.TEMPMAIL_DOMAIN`：Web 端注入配置时
+        #:    传空串是"显式要求用空"，`or` 会把它静默换成 .env 里的值 ——
+        #:    表现是"页面上改了域名却没生效"，而且不报错。
+        self.domain = domain if domain is not None else config.TEMPMAIL_DOMAIN
+        self.s = session or requests.Session()
+        self.s.headers.update({"User-Agent": config.UA, "Accept": "application/json"})
+        self.stats = Stats()
+
+    # ── 底层 ──────────────────────────────────────────────────────────
+    def _request(self, method: str, path: str, *, retries: int = 4,
+                 backoff: float = 0.8, **kw) -> requests.Response:
+        """5xx 重试、4xx 立刻失败。"""
+        last: Exception | None = None
+        for attempt in range(retries):
+            try:
+                r = self.s.request(method, f"{self.base}{path}", timeout=30, **kw)
+            except requests.RequestException as exc:
+                last = exc
+                if attempt < retries - 1:
+                    time.sleep(backoff * (attempt + 1))
+                    continue
+                raise TempMailError(f"网络失败 {path}: {exc}") from exc
+
+            if 500 <= r.status_code < 600:
+                self.stats.http_5xx += 1
+                if attempt < retries - 1:
+                    time.sleep(backoff * (attempt + 1))
+                    continue
+                raise TempMailError(
+                    f"邮箱服务持续 5xx（{self.stats.http_5xx} 次，最近 HTTP {r.status_code}）"
+                    f"—— 不是邮件没到，是读不出来"
+                )
+            if 400 <= r.status_code < 500:
+                # 4xx 立刻失败：错误文本里已带状态码与响应体，
+                # 不需要再维护一个"只写不读"的计数器（2026-09-20 二轮审计）。
+                raise TempMailError(f"HTTP {r.status_code} {path}: {r.text[:200]}")
+            return r
+        raise TempMailError(f"重试耗尽: {path} ({last})")
+
+    def health(self) -> dict[str, Any]:
+        r = self._request("GET", "/health")
+        return r.json()
+
+    # ── 建邮箱 ────────────────────────────────────────────────────────
+    def create_mailbox(self, domain: str | None = None) -> str:
+        body: dict[str, Any] = {}
+        # 优先级：调用参数 > 实例配置（可能来自 Web 端）> .env
+        use_domain = domain or self.domain
+        if use_domain:
+            body["domain"] = use_domain
+        r = self._request(
+            "POST", "/api/mailboxes",
+            headers={"Authorization": f"Bearer {self.admin_key}",
+                     "Content-Type": "application/json"},
+            data=json.dumps(body),
+        )
+        data = r.json()
+        emails = data.get("emails") or []
+        if not emails:
+            raise TempMailError(f"建邮箱未返回地址: {data}")
+        return emails[0]
+
+    # ── 收信 ──────────────────────────────────────────────────────────
+    def list_mails(self, email: str | None = None, limit: int | None = None) -> list[Mail]:
+        """给了 email 走索引端点（读 0~2 行）；不给则退回 /admin/all（保留旧路径）。"""
+        if email:
+            self.stats.polls += 1
+            r = self._request("GET", "/api/inbox", params={"email": email})
+            msgs = (r.json() or {}).get("messages") or []
+        else:
+            self.stats.polls += 1
+            params = {"limit": limit or 20}
+            r = self._request("GET", "/admin/all", params=params,
+                              headers={"Authorization": f"Bearer {self.admin_key}"})
+            body = r.json() or {}
+            msgs = body.get("messages") if isinstance(body, dict) else body
+            msgs = msgs or []
+
+        out: list[Mail] = []
+        for m in msgs:
+            out.append(Mail(
+                id=str(m.get("id", "")),
+                to=m.get("to_address") or m.get("to") or "",
+                sender=m.get("from_address") or m.get("from") or "",
+                subject=m.get("subject") or "",
+                body=m.get("body") or m.get("text") or m.get("raw_text") or "",
+                received_at=int(m.get("received_at") or 0),
+            ))
+        out.sort(key=lambda x: x.received_at)
+        return out
+
+    def wait_for_mail(self, email: str, match: Callable[[Mail], bool], *,
+                      timeout: float = 300.0, interval: float = 0.5,
+                      since_ms: int | None = None) -> Mail | None:
+        """轮询等一封满足条件的邮件。
+
+        `since_ms` 用于跳过历史邮件 —— 同一个地址可能已经收过旧邮件。
+        读信必须当场读走：该 Worker 的 retention 是"全表 100 行"，
+        我们自己跑批次时写入速率可达 ~600 封/时，未读邮件存活仅约 10 分钟。
+
+        ⚠️ `interval` 默认值 2026-09-21 从 2.0 降到 **0.5**，理由与成本核算见
+        `stages.MAIL_POLL_INTERVAL`（那边是生产策略的真源，这里是同签名默认值）。
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for m in self.list_mails(email=email):
+                if since_ms is not None and m.received_at < since_ms:
+                    continue
+                if match(m):
+                    return m
+            time.sleep(interval)
+        return None
+
+    def scan_all(self, limit: int = 100) -> list[Mail]:
+        """扫整个窗口（不按收件人过滤）。
+
+        只用于"监听获批邮件"这类**不知道收件人是谁**的场景：
+        申请可能在别处（网页 UI）提交，地址不在我们台账里。
+
+        ⚠️ 这条通路会占满窗口读取额度，**不要**用它做常规收信 ——
+        常规收信一律走 `list_mails(email=...)` 的索引端点。
+        另：服务端对该参数有硬上限，实测 `limit=200/500/1000` 都只返回 100 条。
+        """
+        return self.list_mails(email=None, limit=limit)
