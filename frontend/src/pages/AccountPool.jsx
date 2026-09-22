@@ -39,6 +39,7 @@ import {
   exportAccounts,
   getAccountBatches
 } from '../api'
+import AccountCheckBar from '../components/AccountCheckBar'
 import dayjs from 'dayjs'
 
 const { Text } = Typography
@@ -47,6 +48,17 @@ const STATUS_MAP = {
   available: { text: '可分配', color: 'green' },
   assigned: { text: '已提取', color: 'blue' },
   invalid: { text: '已失效', color: 'red' }
+}
+
+// 巡检结论。与上面的 status 是两个维度：status 是「能不能发给用户」，
+// check_status 是「这把 key 探测得到什么结果」。
+// 一个 assigned 的账号也可能已经 dead（已发出去的号失效了）。
+const CHECK_MAP = {
+  alive: { text: '正常', color: 'green' },
+  dead: { text: '失效', color: 'red' },
+  // 「无法判定」不是「失效」—— 网络抖动、5xx、限流都会落到这里。
+  // 用中性色，避免运维看到一片红以为号全废了。
+  unknown: { text: '无法判定', color: 'orange' }
 }
 
 export default function AccountPool() {
@@ -283,6 +295,50 @@ export default function AccountPool() {
       )
     },
     {
+      title: '巡检',
+      dataIndex: 'check_status',
+      width: 130,
+      render: (v, record) => {
+        if (!v) return <Text type="secondary">未检查</Text>
+
+        const cfg = CHECK_MAP[v] || { text: v, color: 'default' }
+        return (
+          <Space size={4} direction="vertical" style={{ lineHeight: 1.4 }}>
+            <Space size={4}>
+              <Tag color={cfg.color} style={{ marginInlineEnd: 0 }}>{cfg.text}</Tag>
+              {/* 连续失败次数 —— 让人看出「还差几次才会被标失效」，
+                  否则一个号明明探测失败了却还是可分配，看起来像 bug */}
+              {record.fail_streak > 0 && (
+                <Tooltip title={`连续 ${record.fail_streak} 次探测失败。达到阈值后才会标记失效。`}>
+                  <Tag color="red" style={{ marginInlineEnd: 0 }}>×{record.fail_streak}</Tag>
+                </Tooltip>
+              )}
+            </Space>
+            {record.check_error && (
+              <Tooltip title={record.check_error}>
+                <Text type="secondary" style={{ fontSize: 11, cursor: 'help' }}>
+                  {record.check_error.length > 16
+                    ? `${record.check_error.slice(0, 16)}…`
+                    : record.check_error}
+                </Text>
+              </Tooltip>
+            )}
+          </Space>
+        )
+      }
+    },
+    {
+      title: '最近巡检',
+      dataIndex: 'last_checked_at',
+      width: 150,
+      render: (time, record) =>
+        time ? (
+          <Tooltip title={`累计检查 ${record.checked_count || 0} 次`}>
+            {dayjs(time).format('MM-DD HH:mm')}
+          </Tooltip>
+        ) : <Text type="secondary">-</Text>
+    },
+    {
       title: '绑定卡密',
       dataIndex: 'card_key',
       width: 180,
@@ -428,6 +484,19 @@ export default function AccountPool() {
         </Select>
 
         <Select
+          placeholder="筛选巡检结果"
+          allowClear
+          style={{ width: 150 }}
+          onChange={value => handleFilterChange('check_status', value)}
+        >
+          {Object.entries(CHECK_MAP).map(([value, cfg]) => (
+            <Select.Option key={value} value={value}>{cfg.text}</Select.Option>
+          ))}
+          {/* never 是后端约定的取值：空串在 query string 里和「没传」无法区分 */}
+          <Select.Option value="never">未检查</Select.Option>
+        </Select>
+
+        <Select
           placeholder="筛选批次"
           allowClear
           style={{ width: 200 }}
@@ -439,12 +508,30 @@ export default function AccountPool() {
         </Select>
       </div>
 
+      <Card size="small" style={{ marginBottom: 16 }}>
+        <AccountCheckBar compact onFinished={refreshAll} />
+
+        {stats.check && (
+          <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>全池巡检分布：</Text>
+            <Tag color="green">正常 {stats.check.alive || 0}</Tag>
+            <Tag color="red">失效 {stats.check.dead || 0}</Tag>
+            <Tooltip title="网络抖动、限流或服务端 5xx 时会落到这里。不代表账号有问题，下一轮会重试。">
+              <Tag color="orange" style={{ cursor: 'help' }}>
+                无法判定 {stats.check.unknown || 0}
+              </Tag>
+            </Tooltip>
+            <Tag>未检查 {stats.check.never || 0}</Tag>
+          </div>
+        )}
+      </Card>
+
       <Table
         columns={columns}
         dataSource={data}
         rowKey="id"
         loading={loading}
-        scroll={{ x: 1500 }}
+        scroll={{ x: 1780 }}
         rowSelection={{
           selectedRowKeys: selectedKeys,
           onChange: setSelectedKeys,

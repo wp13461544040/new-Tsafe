@@ -1,14 +1,50 @@
 import { useEffect, useState } from 'react'
-import { Card, Form, Input, Button, message, Table, Tabs, Alert, Space, Tag, Typography } from 'antd'
+import {
+  Card, Form, Input, Button, message, Table, Tabs, Alert, Space, Tag, Typography,
+  Switch, InputNumber, Select, Divider
+} from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import {
   getSystemConfig, updateSystemConfig, getOperationLogs,
-  getSiteConfig, updateSiteConfig
+  getSiteConfig, updateSiteConfig,
+  getAccountCheckConfig, updateAccountCheckConfig
 } from '../api'
+import AccountCheckBar from '../components/AccountCheckBar'
 import dayjs from 'dayjs'
 
 const { TextArea } = Input
 const { Text } = Typography
+
+// 巡检配置项的中文标签。后端 schema 里的 desc 是给开发看的，
+// 这里给运维看 —— 两者受众不同，不要指望一份文案两头用。
+const CHECK_LABELS = {
+  enabled: '启用定时巡检',
+  interval_hours: '巡检间隔（小时）',
+  limit: '单轮检查上限',
+  concurrency: '并发探测数',
+  dead_threshold: '连续失败几次判失效',
+  include_assigned: '同时检查已提取的账号',
+  mode: '探测方式',
+  timeout: '单次超时（秒）',
+  min_interval_hours: '跳过最近N小时内已检查的'
+}
+
+const CHECK_HINTS = {
+  enabled: '关闭时不会自动跑，但仍可手动触发。',
+  interval_hours: '改动最迟 60 秒生效，不需要重启。',
+  limit: '账号多时分轮检查，按「最久没检查的优先」排序，轮到即可。',
+  concurrency: '太高可能被目标站点限流，限流会被判成「无法判定」而不是失效。',
+  dead_threshold: '设 1 会让一次网络抖动就把账号标失效，建议至少 2。',
+  include_assigned: '已提取的账号即使探测失效也不会被改状态，只记录结论供排查。',
+  mode: '零额度探测只验证认证是否通过，不产生 token 消耗；真实推理最准但每次约消耗 317 tokens。',
+  timeout: '超时会被判成「无法判定」，不会误标失效。',
+  min_interval_hours: '0 表示跟随巡检间隔。手动触发时此项始终按 0 处理。'
+}
+
+const MODE_OPTIONS = [
+  { value: 'probe', label: '零额度探测（推荐）' },
+  { value: 'inference', label: '真实推理（消耗额度）' }
+]
 
 export default function SystemSettings() {
   const [announcementForm] = Form.useForm()
@@ -21,9 +57,16 @@ export default function SystemSettings() {
   const [saveLoading, setSaveLoading] = useState(false)
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
 
+  const [checkForm] = Form.useForm()
+  const [checkSchema, setCheckSchema] = useState({})
+  const [checkLoading, setCheckLoading] = useState(false)
+  const [checkSaving, setCheckSaving] = useState(false)
+  const [checkMode, setCheckMode] = useState('probe')
+
   useEffect(() => {
     loadAnnouncement()
     loadSiteConfig()
+    loadCheckConfig()
   }, [])
 
   useEffect(() => {
@@ -43,6 +86,37 @@ export default function SystemSettings() {
       console.error('加载站点配置失败:', error)
     } finally {
       setSiteLoading(false)
+    }
+  }
+
+  const loadCheckConfig = async () => {
+    setCheckLoading(true)
+    try {
+      const res = await getAccountCheckConfig()
+      setCheckSchema(res.schema || {})
+      checkForm.setFieldsValue(res.config || {})
+      setCheckMode(res.config?.mode || 'probe')
+    } catch (error) {
+      console.error('加载巡检配置失败:', error)
+    } finally {
+      setCheckLoading(false)
+    }
+  }
+
+  const handleSaveCheckConfig = async (values) => {
+    setCheckSaving(true)
+    try {
+      const res = await updateAccountCheckConfig(values)
+      message.success(res.message || '已保存')
+      // 用后端返回的配置回填，而不是信任表单里的值 ——
+      // 后端会做类型归一（比如 min_interval_hours 的 0 语义），
+      // 不回填会出现「页面显示的和实际生效的不一致」。
+      checkForm.setFieldsValue(res.config || {})
+      setCheckMode(res.config?.mode || 'probe')
+    } catch (error) {
+      console.error('保存巡检配置失败:', error)
+    } finally {
+      setCheckSaving(false)
     }
   }
 
@@ -224,8 +298,132 @@ export default function SystemSettings() {
       )
     },
     {
+      key: 'check',
+      label: '账号巡检',
+      // 🔴 forceRender 必须开。Tabs 默认懒渲染非激活面板，而配置是在
+      //    mount 时异步加载并 setFieldsValue 的 —— Form 还没挂载，值直接丢，
+      //    用户切过来看到的是一张空表单（antd 只会在 console 里警告
+      //    "Instance created by useForm is not connected to any Form element"）。
+      forceRender: true,
+      children: (
+        <Card loading={checkLoading}>
+          <AccountCheckBar onFinished={loadCheckConfig} />
+
+          <Divider style={{ margin: '20px 0 16px' }} />
+
+          <Alert
+            type={checkMode === 'inference' ? 'warning' : 'info'}
+            showIcon
+            message={
+              checkMode === 'inference'
+                ? '当前为真实推理模式，每次探测都会消耗账号额度'
+                : '当前为零额度探测，不消耗账号额度'
+            }
+            description={
+              <div style={{ fontSize: 13, lineHeight: 1.8 }}>
+                巡检定期探测账号池里的 key 是否还能用，失效的会自动标记，
+                避免用户提取到废号。
+                <br />
+                零额度探测只验证「认证是否通过」，不发起推理；真实推理模式每次约消耗
+                317 tokens，按 1000 个账号每 6 小时一轮算，一天约 127 万 tokens。
+                <br />
+                <Text type="secondary">
+                  网络抖动、限流、服务端 5xx 都会被判成「无法判定」而不是失效，
+                  且需要连续失败达到阈值才会真的标记失效 —— 这是为了避免一次网络故障
+                  把整池账号误标废。
+                </Text>
+              </div>
+            }
+            style={{ marginBottom: 20 }}
+          />
+
+          <Form
+            form={checkForm}
+            onFinish={handleSaveCheckConfig}
+            layout="vertical"
+            onValuesChange={(changed) => {
+              // mode 变了要立刻更新上方提示的措辞，否则用户改成 inference
+              // 后仍看到「不消耗额度」，那是明确的误导
+              if ('mode' in changed) setCheckMode(changed.mode)
+            }}
+          >
+            {Object.entries(checkSchema).map(([key, meta]) => {
+              const label = (
+                <Space size={6}>
+                  <span>{CHECK_LABELS[key] || key}</span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>({key})</Text>
+                  {key === 'mode' && checkMode === 'inference' && (
+                    <Tag color="orange" style={{ marginInlineEnd: 0 }}>消耗额度</Tag>
+                  )}
+                </Space>
+              )
+              const extra = CHECK_HINTS[key] || meta.desc
+
+              if (meta.type === 'bool') {
+                return (
+                  <Form.Item
+                    key={key}
+                    label={label}
+                    name={key}
+                    extra={extra}
+                    valuePropName="checked"
+                  >
+                    <Switch />
+                  </Form.Item>
+                )
+              }
+
+              if (meta.choices) {
+                return (
+                  <Form.Item key={key} label={label} name={key} extra={extra}>
+                    <Select
+                      style={{ maxWidth: 280 }}
+                      options={key === 'mode' ? MODE_OPTIONS
+                        : meta.choices.map(c => ({ value: c, label: c }))}
+                    />
+                  </Form.Item>
+                )
+              }
+
+              // 数值项的下限跟后端校验对齐。前端不拦的话用户填 0 会拿到
+              // 一个 400，而错误提示远不如输入框旁边的约束直观。
+              const isInt = meta.type === 'int'
+              const min = ['limit', 'concurrency', 'dead_threshold'].includes(key)
+                ? 1
+                : key === 'min_interval_hours' ? 0 : 0.1
+
+              return (
+                <Form.Item key={key} label={label} name={key} extra={extra}>
+                  <InputNumber
+                    style={{ width: 200 }}
+                    min={min}
+                    step={isInt ? 1 : 0.5}
+                    precision={isInt ? 0 : 1}
+                  />
+                </Form.Item>
+              )
+            })}
+
+            <Form.Item style={{ marginBottom: 0 }}>
+              <Space>
+                <Button type="primary" htmlType="submit" loading={checkSaving}>
+                  保存配置
+                </Button>
+                <Button icon={<ReloadOutlined />} onClick={loadCheckConfig}>
+                  重新加载
+                </Button>
+              </Space>
+            </Form.Item>
+          </Form>
+        </Card>
+      )
+    },
+    {
       key: 'announcement',
       label: '公告配置',
+      // 同上：loadAnnouncement 在 mount 时 setFieldsValue，不加 forceRender
+      // 的话已保存的公告在这个 tab 里显示为空，看起来像公告丢了。
+      forceRender: true,
       children: (
         <Card>
           <Form

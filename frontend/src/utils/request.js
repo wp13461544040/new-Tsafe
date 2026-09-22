@@ -27,9 +27,19 @@ request.interceptors.response.use(
     return response.data
   },
   error => {
+    // 轮询类请求（巡检状态每 2s 一次）失败时不该弹 toast：
+    // 后端重启或网络抖一下，页面就会被几十个「请求失败」淹没，
+    // 真正重要的提示反而被挤掉。调用方传 { silent: true } 自行处理。
+    // 401 例外 —— 登录过期必须跳转，静默会让用户对着空页面发呆。
+    const silent = error.config?.silent === true
+
     if (error.response) {
       const { status, data } = error.response
-      
+
+      if (silent && status !== 401) {
+        return Promise.reject(error)
+      }
+
       if (status === 401) {
         message.error('登录已过期，请重新登录')
         clearAuth()
@@ -44,9 +54,9 @@ request.interceptors.response.use(
         message.error(data.error || '请求失败')
       }
     } else if (error.request) {
-      message.error('网络错误，请检查网络连接')
+      if (!silent) message.error('网络错误，请检查网络连接')
     } else {
-      message.error('请求配置错误')
+      if (!silent) message.error('请求配置错误')
     }
     
     return Promise.reject(error)

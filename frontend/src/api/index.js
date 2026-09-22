@@ -43,6 +43,16 @@ export const exportAccounts = (params) =>
   request.get('/account/export', { params, responseType: 'blob' })
 export const getAccountBatches = () => request.get('/account/batches')
 
+// 账号巡检（验活）
+// 手动触发时传的参数只覆盖这一轮，不会改掉定时任务的配置
+export const startAccountCheck = (data = {}) => request.post('/account/check', data)
+export const stopAccountCheck = () => request.post('/account/check/stop')
+// silent：这个端点被 2 秒一次地轮询，失败时不弹 toast（否则会刷屏）
+export const getAccountCheckStatus = () =>
+  request.get('/account/check/status', { silent: true })
+export const getAccountCheckConfig = () => request.get('/account/check/config')
+export const updateAccountCheckConfig = (data) => request.post('/account/check/config', data)
+
 // 系统配置
 export const getSystemConfig = (key) => request.get('/system/config', { params: { key } })
 export const updateSystemConfig = (data) => request.post('/system/config', data)
