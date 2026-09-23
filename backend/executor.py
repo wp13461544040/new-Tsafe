@@ -1,4 +1,4 @@
-"""注册任务执行器：把 `RegisterTask` 真正跑起来。
+﻿"""注册任务执行器：把 `RegisterTask` 真正跑起来。
 
 设计取舍：
 - **用后台线程而不是 Celery / RQ**：这个管理端是单机自用工具，引消息队列要多跑
@@ -11,7 +11,7 @@
 """
 import threading
 import traceback
-from datetime import datetime
+from backend.timeutil import now
 
 from backend.mailfactory import MailConfigError, build_mail_client
 from backend.models import MailConfig, OperationLog, RegisterTask, db
@@ -54,7 +54,7 @@ def recover_stale_tasks(app) -> int:
         for t in stale:
             t.status = "failed"
             t.error_message = "服务重启导致任务中断（进程内线程随进程退出）"
-            t.completed_at = datetime.utcnow()
+            t.completed_at = now()
         if stale:
             db.session.commit()
         return len(stale)
@@ -89,7 +89,7 @@ def _run_task(app, task_id: int):
                     f"站点配置不完整，缺少：{'、'.join(missing_site)}。"
                     f"请到「系统设置 → 站点配置」补全"
                 )
-                task.completed_at = datetime.utcnow()
+                task.completed_at = now()
                 db.session.commit()
                 return
 
@@ -100,12 +100,12 @@ def _run_task(app, task_id: int):
             except MailConfigError as exc:
                 task.status = "failed"
                 task.error_message = str(exc)
-                task.completed_at = datetime.utcnow()
+                task.completed_at = now()
                 db.session.commit()
                 return
 
             task.status = "running"
-            task.started_at = datetime.utcnow()
+            task.started_at = now()
             task.progress = 0
             task.success_count = 0
             task.failed_count = 0
@@ -139,7 +139,7 @@ def _run_task(app, task_id: int):
                 if cancel.is_set():
                     task.status = "cancelled"
                     task.error_message = f"用户取消（已完成 {done}/{total}）"
-                    task.completed_at = datetime.utcnow()
+                    task.completed_at = now()
                     db.session.commit()
                     return
 
@@ -155,7 +155,7 @@ def _run_task(app, task_id: int):
                     # 不要继续白跑剩下的批次。
                     task.status = "failed"
                     task.error_message = f"{type(exc).__name__}: {exc}"
-                    task.completed_at = datetime.utcnow()
+                    task.completed_at = now()
                     db.session.commit()
                     app.logger.exception("任务 %s 批次异常", task_id)
                     return
@@ -201,7 +201,7 @@ def _run_task(app, task_id: int):
                         + (f"，最后一条错误：{last_error[:300]}" if last_error else "")
                     )
 
-            task.completed_at = datetime.utcnow()
+            task.completed_at = now()
             db.session.commit()
 
             log = OperationLog(
@@ -221,7 +221,7 @@ def _run_task(app, task_id: int):
                 if t is not None and t.status == "running":
                     t.status = "failed"
                     t.error_message = f"执行器异常：{traceback.format_exc(limit=3)[:500]}"
-                    t.completed_at = datetime.utcnow()
+                    t.completed_at = now()
                     db.session.commit()
         except Exception:  # noqa: BLE001
             pass

@@ -1,4 +1,4 @@
-"""账号池巡检验活执行器。
+﻿"""账号池巡检验活执行器。
 
 设计要点：
 
@@ -23,6 +23,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+
+from backend.timeutil import now
 
 from backend.models import Account, OperationLog, db
 from src import config as site_config
@@ -173,7 +175,7 @@ def next_run_at(cfg: dict | None = None) -> datetime | None:
         return None
     last = _get_last_run()
     if last is None:
-        return datetime.utcnow()
+        return now()
     return last + timedelta(hours=max(0.1, cfg["interval_hours"]))
 
 
@@ -223,7 +225,7 @@ def _pick_targets(*, limit: int, include_assigned: bool,
     # 跳过刚检查过的：定时巡检每小时触发一次，但间隔设 24h 时
     # 不该每小时把同一批又检查一遍。
     if min_interval_hours > 0:
-        cutoff = datetime.utcnow() - timedelta(hours=min_interval_hours)
+        cutoff = now() - timedelta(hours=min_interval_hours)
         q = q.filter(
             db.or_(Account.last_checked_at.is_(None),
                    Account.last_checked_at < cutoff)
@@ -271,7 +273,7 @@ def run_check(app, *, limit: int = 200, concurrency: int = 5,
         "ok": True, "checked": 0, "alive": 0, "dead": 0, "unknown": 0,
         "newly_invalid": 0, "recovered": 0, "total": 0,
         "aborted": "", "triggered_by": triggered_by,
-        "started_at": datetime.utcnow().isoformat(),
+        "started_at": now().isoformat(),
     }
 
     try:
@@ -383,7 +385,7 @@ def run_check(app, *, limit: int = 200, concurrency: int = 5,
         stats.update(ok=False, error=f"{type(exc).__name__}: {exc}")
     finally:
         stats["elapsed"] = round(time.time() - started, 1)
-        stats["finished_at"] = datetime.utcnow().isoformat()
+        stats["finished_at"] = now().isoformat()
         with _lock:
             _running = False
             _stop_event = None
@@ -429,7 +431,7 @@ def _scheduler_loop(app, stop: threading.Event) -> None:
 
                 last = _get_last_run()
                 interval = max(0.1, cfg["interval_hours"])
-                due = last is None or (datetime.utcnow() - last) >= timedelta(hours=interval)
+                due = last is None or (now() - last) >= timedelta(hours=interval)
 
                 if not due:
                     stop.wait(SCHED_TICK)
@@ -458,7 +460,7 @@ def _scheduler_loop(app, stop: threading.Event) -> None:
                 # 🔴 无论成功与否都记完成时间：失败了也别马上重试，
                 #    否则端点挂着时会每分钟打一次。
                 with app.app_context():
-                    _set_last_run(datetime.utcnow())
+                    _set_last_run(now())
 
                 if stats.get("checked"):
                     app.logger.info(

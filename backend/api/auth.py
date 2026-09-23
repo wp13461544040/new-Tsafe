@@ -1,5 +1,5 @@
-"""认证 API"""
-from datetime import datetime
+﻿"""认证 API"""
+from backend.timeutil import now
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import (
     create_access_token,
@@ -37,7 +37,7 @@ def login():
         return jsonify({"error": "账号已被禁用"}), 403
     
     # 更新最后登录时间
-    user.last_login = datetime.utcnow()
+    user.last_login = now()
     db.session.commit()
     
     # 生成 token (identity 必须是字符串)

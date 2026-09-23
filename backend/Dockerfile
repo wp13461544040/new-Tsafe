@@ -7,7 +7,15 @@ FROM python:3.12-slim
 # 不写 .pyc、日志不缓冲（不设 PYTHONUNBUFFERED 的话容器日志会延迟甚至丢）
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    TZ=Asia/Shanghai
+
+# 容器默认 UTC —— gunicorn/Flask 日志时间会比北京时间慢 8 小时。
+# slim 镜像不带 tzdata，只设 TZ 不装库是无效的。
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

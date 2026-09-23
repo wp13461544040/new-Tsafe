@@ -1,8 +1,8 @@
-"""账号池管理 API（管理端，需要登录）"""
+﻿"""账号池管理 API（管理端，需要登录）"""
 import csv
 import json
 from io import StringIO
-from datetime import datetime
+from backend.timeutil import now
 
 from flask import Blueprint, request, jsonify, make_response
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -284,7 +284,7 @@ def import_accounts():
         else:
             return jsonify({"error": "不支持的内容类型，请使用 JSON、CSV 或 TXT 格式"}), 400
 
-        batch_id = request.args.get("batch_id") or f"POOL-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        batch_id = request.args.get("batch_id") or f"POOL-{now().strftime('%Y%m%d%H%M%S')}"
 
         for idx, row in enumerate(rows, 1):
             api_key = str(row.get("api_key") or "").strip()
@@ -318,7 +318,7 @@ def import_accounts():
                 status="available",
                 batch_id=batch_id,
                 created_by=user_id,
-                remarks=f"导入于 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}",
+                remarks=f"导入于 {now().strftime('%Y-%m-%d %H:%M:%S')}",
             )
             db.session.add(account)
             success_count += 1
@@ -484,7 +484,7 @@ def export_accounts():
         response = make_response(payload)
         response.headers["Content-Type"] = "application/json; charset=utf-8"
         response.headers["Content-Disposition"] = \
-            f"attachment; filename=accounts_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json"
+            f"attachment; filename=accounts_{now().strftime('%Y%m%d%H%M%S')}.json"
         return response
 
     if format_type == "txt":
@@ -495,7 +495,7 @@ def export_accounts():
         response = make_response(output.getvalue())
         response.headers["Content-Type"] = "text/plain; charset=utf-8"
         response.headers["Content-Disposition"] = \
-            f"attachment; filename=accounts_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.txt"
+            f"attachment; filename=accounts_{now().strftime('%Y%m%d%H%M%S')}.txt"
         return response
 
     output = StringIO()
@@ -517,7 +517,7 @@ def export_accounts():
     response = make_response(output.getvalue())
     response.headers["Content-Type"] = "text/csv; charset=utf-8-sig"
     response.headers["Content-Disposition"] = \
-        f"attachment; filename=accounts_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.csv"
+        f"attachment; filename=accounts_{now().strftime('%Y%m%d%H%M%S')}.csv"
     return response
 
 

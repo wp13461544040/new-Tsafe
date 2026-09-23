@@ -1,11 +1,12 @@
-"""卡密管理 API"""
+﻿"""卡密管理 API"""
 from flask import Blueprint, request, jsonify, make_response
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from backend.models import db, CardKey, User, OperationLog
 from backend.config import CARD_KEY_PREFIX, CARD_KEY_LENGTH
 import csv
 from io import StringIO
-from datetime import datetime, timedelta
+from datetime import timedelta
+from backend.timeutil import now
 
 bp = Blueprint("card", __name__)
 
@@ -81,7 +82,7 @@ def generate_cards():
     expires_at = None
     if expires_days:
         try:
-            expires_at = datetime.utcnow() + timedelta(days=int(expires_days))
+            expires_at = now() + timedelta(days=int(expires_days))
         except (TypeError, ValueError):
             return jsonify({"error": "有效期天数格式错误"}), 400
 
@@ -89,7 +90,7 @@ def generate_cards():
 
     # 如果没有提供 batch_id，自动生成
     if not batch_id:
-        batch_id = f"BATCH-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        batch_id = f"BATCH-{now().strftime('%Y%m%d%H%M%S')}"
 
     cards = []
     for _ in range(count):
@@ -159,7 +160,7 @@ def update_card(card_id):
 
     if "expires_days" in data:
         days = data["expires_days"]
-        card.expires_at = (datetime.utcnow() + timedelta(days=int(days))) if days else None
+        card.expires_at = (now() + timedelta(days=int(days))) if days else None
 
     if "status" in data:
         status = data["status"]
@@ -221,7 +222,7 @@ def bind_card():
     card.email = email
     card.api_key_id = api_key_id
     card.status = "used"
-    card.used_at = datetime.utcnow()
+    card.used_at = now()
     
     db.session.commit()
     
@@ -271,7 +272,7 @@ def export_cards():
 
         response = make_response(output.getvalue())
         response.headers["Content-Type"] = "text/plain; charset=utf-8"
-        response.headers["Content-Disposition"] = f"attachment; filename=cards_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.txt"
+        response.headers["Content-Disposition"] = f"attachment; filename=cards_{now().strftime('%Y%m%d%H%M%S')}.txt"
         return response
 
     else:  # csv
@@ -294,7 +295,7 @@ def export_cards():
         
         response = make_response(output.getvalue())
         response.headers["Content-Type"] = "text/csv; charset=utf-8-sig"
-        response.headers["Content-Disposition"] = f"attachment; filename=cards_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.csv"
+        response.headers["Content-Disposition"] = f"attachment; filename=cards_{now().strftime('%Y%m%d%H%M%S')}.csv"
         return response
 
 
@@ -396,7 +397,7 @@ def import_cards():
         else:
             return jsonify({"error": "不支持的内容类型，请使用 JSON、CSV 或 TXT 格式"}), 400
 
-        batch_id = f"IMPORT-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        batch_id = f"IMPORT-{now().strftime('%Y%m%d%H%M%S')}"
 
         for idx, row in enumerate(rows, 1):
             card_key = str(row.get("card_key", "")).strip()
@@ -432,7 +433,7 @@ def import_cards():
                 status="unused",
                 batch_id=batch_id,
                 created_by=user_id,
-                remarks=f"批量导入于 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+                remarks=f"批量导入于 {now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
             db.session.add(card)
             success_count += 1

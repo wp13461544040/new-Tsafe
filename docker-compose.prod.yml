@@ -30,6 +30,8 @@ services:
       # 首次启动创建管理员用。留空则随机生成，看 `docker compose logs backend` 取。
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # 日志时间按北京时间输出（业务时间戳由 backend/timeutil.py 固定 UTC+8，不依赖此项）
+      - TZ=Asia/Shanghai
 
     networks:
       - jev-net

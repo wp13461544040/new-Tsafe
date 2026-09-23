@@ -1,8 +1,8 @@
-"""公开 API（对外开放，无需登录认证）
+﻿"""公开 API（对外开放，无需登录认证）
 
 用于卡密持有者自助提取账号，不暴露任何管理功能。
 """
-from datetime import datetime
+from backend.timeutil import now
 from flask import Blueprint, request, jsonify
 from backend.models import db, CardKey, Account, SystemConfig
 
@@ -105,16 +105,16 @@ def extract():
             "available": len(accounts),
         }), 409
 
-    now = datetime.utcnow()
+    assign_time = now()
 
     for acc in accounts:
         acc.status = "assigned"
         acc.card_key_id = card.id
-        acc.assigned_at = now
+        acc.assigned_at = assign_time
 
     card.extracted_count = (card.extracted_count or 0) + len(accounts)
     if card.used_at is None:
-        card.used_at = now
+        card.used_at = assign_time
     card.status = "used" if card.remaining <= 0 else "partial"
 
     try:

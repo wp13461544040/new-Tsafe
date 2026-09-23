@@ -30,6 +30,8 @@ services:
     #   · JWT 密钥 → 首次启动自动生成到 backend/data/.secret_key（已挂载持久化）
     environment:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # 日志时间按北京时间输出（业务时间戳由 backend/timeutil.py 固定 UTC+8，不依赖此项）
+      - TZ=Asia/Shanghai
 
     networks:
       - jev-net

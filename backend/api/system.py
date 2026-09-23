@@ -1,6 +1,7 @@
-"""系统管理 API"""
+﻿"""系统管理 API"""
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
+from backend.timeutil import now
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import func
@@ -222,7 +223,7 @@ def cleanup():
     days = data.get("days", 30)
     
     # 删除指定天数前的操作日志
-    cutoff_date = datetime.utcnow() - timedelta(days=days)
+    cutoff_date = now() - timedelta(days=days)
     deleted_logs = OperationLog.query.filter(
         OperationLog.created_at < cutoff_date
     ).delete()

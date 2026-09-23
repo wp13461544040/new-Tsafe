@@ -1,5 +1,5 @@
-"""注册任务 API"""
-from datetime import datetime
+﻿"""注册任务 API"""
+from backend.timeutil import now
 
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -182,7 +182,7 @@ def cancel_task(task_id):
         # 线程不在（pending 还没起、或进程重启过）⇒ 这里直接落状态
         task.status = "cancelled"
         task.error_message = "任务已被取消"
-        task.completed_at = datetime.utcnow()
+        task.completed_at = now()
         db.session.commit()
         message = "任务已取消"
     

@@ -1,9 +1,10 @@
-"""统计数据 API"""
+﻿"""统计数据 API"""
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from backend.models import db, RegisterTask, CardKey, MailConfig, OperationLog
 from sqlalchemy import func
-from datetime import datetime, timedelta
+from datetime import timedelta
+from backend.timeutil import now
 
 bp = Blueprint("stats", __name__)
 
@@ -39,7 +40,7 @@ def get_overview():
     active_mail_configs = MailConfig.query.filter_by(is_active=True).count()
     
     # 最近7天的任务趋势
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+    seven_days_ago = now() - timedelta(days=7)
     recent_tasks = RegisterTask.query.filter(
         RegisterTask.created_at >= seven_days_ago
     ).all()
@@ -57,7 +58,7 @@ def get_overview():
     # 填充缺失日期
     trend_data = []
     for i in range(7):
-        date = datetime.utcnow() - timedelta(days=6-i)
+        date = now() - timedelta(days=6-i)
         date_key = date.strftime("%Y-%m-%d")
         trend_data.append({
             "date": date_key,

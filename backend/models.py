@@ -1,5 +1,5 @@
-"""数据模型"""
-from datetime import datetime
+﻿"""数据模型"""
+from backend.timeutil import now
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
@@ -16,7 +16,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(256), nullable=False)
     role = db.Column(db.String(20), nullable=False, default="admin")  # admin, viewer
     is_active = db.Column(db.Boolean, default=True, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, default=now, nullable=False)
     last_login = db.Column(db.DateTime)
 
     def set_password(self, password: str):
@@ -80,8 +80,8 @@ class MailConfig(db.Model):
     moemail_poll_interval = db.Column(db.Float, default=3.0)
     
     is_active = db.Column(db.Boolean, default=True, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=now, nullable=False)
+    updated_at = db.Column(db.DateTime, default=now, onupdate=now)
 
     def to_dict(self, include_sensitive=False):
         """转换为字典"""
@@ -138,7 +138,7 @@ class RegisterTask(db.Model):
     
     started_at = db.Column(db.DateTime)
     completed_at = db.Column(db.DateTime)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, default=now, nullable=False)
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     
     error_message = db.Column(db.Text)
@@ -190,7 +190,7 @@ class CardKey(db.Model):
 
     expires_at = db.Column(db.DateTime)   # 过期时间（可选）
     used_at = db.Column(db.DateTime)      # 首次提取时间
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, default=now, nullable=False)
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
 
     remarks = db.Column(db.Text)
@@ -211,7 +211,7 @@ class CardKey(db.Model):
     @property
     def is_expired(self) -> bool:
         """是否已过期"""
-        return bool(self.expires_at and datetime.utcnow() > self.expires_at)
+        return bool(self.expires_at and now() > self.expires_at)
 
     def check_extractable(self):
         """校验是否可提取，返回 (ok, error_message)"""
@@ -268,7 +268,7 @@ class Account(db.Model):
     card_key_id = db.Column(db.Integer, db.ForeignKey("card_keys.id"), index=True)
     assigned_at = db.Column(db.DateTime)
 
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, default=now, nullable=False)
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"))
 
     remarks = db.Column(db.Text)
@@ -344,8 +344,8 @@ class Account(db.Model):
         设 1 也合理（401 本身是确定性结论），但留个余量能挡住
         "站点短时间返回错误状态码"这类异常。
         """
-        now = checked_at or datetime.utcnow()
-        self.last_checked_at = now
+        checked_time = checked_at or now()
+        self.last_checked_at = checked_time
         self.check_status = verdict
         self.check_error = (error or "")[:1000] or None
         self.checked_count = (self.checked_count or 0) + 1
@@ -384,7 +384,7 @@ class SystemConfig(db.Model):
     key = db.Column(db.String(100), unique=True, nullable=False, index=True)
     value = db.Column(db.Text)
     description = db.Column(db.String(256))
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=now, onupdate=now)
 
     @staticmethod
     def get_value(key: str, default=None):
@@ -432,7 +432,7 @@ class OperationLog(db.Model):
     resource_id = db.Column(db.Integer)
     details = db.Column(db.Text)
     ip_address = db.Column(db.String(50))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime, default=now, nullable=False)
     
     user = db.relationship("User", backref="operation_logs")
 
