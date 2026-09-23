@@ -145,7 +145,8 @@ class Pipeline(StageMixin):
                  accounts_json: "AccountsJson | None" = None,
                  domain: str | None = None,
                  login_mode: str = MODE_CODE, verbose: bool = True,
-                 strict_onboarding: bool = False):
+                 strict_onboarding: bool = False,
+                 log_sink: Callable[[str], None] | None = None):
         self.backend = (backend or DEFAULT_MAIL_BACKEND).strip().lower()
         #: 造"同款"邮箱客户端的方式。`_clone()` 靠它保证并发 worker 用的是
         #: **同一个后端** —— 见 `_clone()` 的 🔴。
@@ -175,11 +176,22 @@ class Pipeline(StageMixin):
         #: ⚠️ 它和 `mail` / `backend` 一样**必须在 `_clone()` 里透传** ——
         #: 漏传会让并发 worker 静默退回另一套行为，而串行永远复现不出来。
         self.strict_onboarding = strict_onboarding
+        #: 额外的日志出口（Web 端用它把过程日志喂给任务详情的实时日志面板）。
+        #: 与 `verbose` 相互独立：CLI 打 stdout，Web 端收进缓冲区，两者可并存。
+        #: ⚠️ 同 `mail` / `strict_onboarding`，**必须在 `_clone()` 里透传** ——
+        #: 漏传的表现是"并发跑时日志只剩主线程那一条"，串行永远复现不出来。
+        self._log_sink = log_sink
 
     def log(self, msg: str) -> None:
         if self.verbose:
             with _LOG_LOCK:
                 print(msg, flush=True)
+        if self._log_sink is not None:
+            # sink 由调用方提供，不能让它的异常把注册流程带崩（日志是副作用）。
+            try:
+                self._log_sink(msg)
+            except Exception:  # noqa: BLE001
+                pass
     # ── 并发脚手架 ────────────────────────────────────────────────────
     def _clone(self) -> "Pipeline":
         """给一个并发 worker 用的**独立**实例。
@@ -205,7 +217,9 @@ class Pipeline(StageMixin):
                         verbose=self.verbose,
                         # ⚠️ 必须透传：漏了它，`--strict-onboarding` 在并发下会静默失效
                         #（串行 `concurrency=1` 走另一条路径，永远复现不出来）。
-                        strict_onboarding=self.strict_onboarding)
+                        strict_onboarding=self.strict_onboarding,
+                        # ⚠️ 同上：漏传会让并发 worker 的日志丢失（Web 端日志面板空一半）。
+                        log_sink=self._log_sink)
 
     def _fan_out(self, jobs: list[tuple[Any, Callable[["Pipeline", Any], AccountRecord]]],
                  *, concurrency: int) -> list[AccountRecord]:

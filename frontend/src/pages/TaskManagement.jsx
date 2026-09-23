@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Table, Button, Modal, Form, Input, InputNumber, Select, Space, message, Tag, Progress, Tooltip, Typography, Alert } from 'antd'
-import { PlusOutlined, StopOutlined, ReloadOutlined } from '@ant-design/icons'
-import { getTasks, createTask, cancelTask, getMailConfigs } from '../api'
+import {
+  PlusOutlined, StopOutlined, ReloadOutlined, FileTextOutlined, DeleteOutlined
+} from '@ant-design/icons'
+import {
+  getTasks, createTask, cancelTask, getMailConfigs, deleteTask, batchDeleteTasks
+} from '../api'
+import TaskLogDrawer from '../components/TaskLogDrawer'
 import dayjs from 'dayjs'
 
 const { Text } = Typography
@@ -11,6 +16,8 @@ export default function TaskManagement() {
   const [mailConfigs, setMailConfigs] = useState([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
+  const [logTask, setLogTask] = useState(null)
+  const [selectedKeys, setSelectedKeys] = useState([])
   const [form] = Form.useForm()
 
   useEffect(() => {
@@ -51,11 +58,14 @@ export default function TaskManagement() {
 
   const handleSubmit = async (values) => {
     try {
-      await createTask(values)
+      const task = await createTask(values)
       message.success('任务创建成功')
       setModalOpen(false)
       form.resetFields()
       loadData()
+      // 直接把日志抽屉打开：任务一跑就是十几秒起，没有实时反馈时
+      // 用户只能盯着进度条猜发生了什么
+      if (task?.id) setLogTask(task)
     } catch (error) {
       console.error('创建失败:', error)
     }
@@ -80,6 +90,45 @@ export default function TaskManagement() {
           loadData()
         } catch (error) {
           console.error('取消失败:', error)
+        }
+      }
+    })
+  }
+
+  const handleDelete = (record) => {
+    Modal.confirm({
+      title: '删除任务',
+      content: `确定删除任务「${record.name}」？只删任务记录，已注册出来的账号仍留在账号池里。`,
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await deleteTask(record.id)
+          message.success('删除成功')
+          // 抽屉正开着看这条任务的日志 ⇒ 记录没了，得关掉，否则轮询会一直 404
+          if (logTask?.id === record.id) setLogTask(null)
+          setSelectedKeys(keys => keys.filter(k => k !== record.id))
+          loadData()
+        } catch (error) {
+          console.error('删除失败:', error)
+        }
+      }
+    })
+  }
+
+  const handleBatchDelete = () => {
+    Modal.confirm({
+      title: `批量删除 ${selectedKeys.length} 个任务`,
+      content: '运行中/待执行的任务会被自动跳过。只删任务记录，不影响账号池。',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          const res = await batchDeleteTasks(selectedKeys)
+          message.success(res.message || '删除成功')
+          if (logTask && selectedKeys.includes(logTask.id)) setLogTask(null)
+          setSelectedKeys([])
+          loadData()
+        } catch (error) {
+          console.error('批量删除失败:', error)
         }
       }
     })
@@ -149,20 +198,42 @@ export default function TaskManagement() {
     },
     {
       title: '操作',
-      width: 90,
+      width: 150,
       fixed: 'right',
       render: (_, record) => (
-        ['pending', 'running'].includes(record.status) && (
+        <Space size={0}>
           <Button
             type="link"
             size="small"
-            danger
-            icon={<StopOutlined />}
-            onClick={() => handleCancel(record)}
+            icon={<FileTextOutlined />}
+            onClick={() => setLogTask(record)}
           >
-            取消
+            日志
           </Button>
-        )
+          {['pending', 'running'].includes(record.status) ? (
+            <Button
+              type="link"
+              size="small"
+              danger
+              icon={<StopOutlined />}
+              onClick={() => handleCancel(record)}
+            >
+              取消
+            </Button>
+          ) : (
+            // 运行中不给删：取消只是打标记，线程还要跑完当前账号才停，
+            // 那期间记录被删会让进度回写落空（后端也会拒绝）
+            <Button
+              type="link"
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={() => handleDelete(record)}
+            >
+              删除
+            </Button>
+          )}
+        </Space>
       )
     }
   ]
@@ -195,6 +266,15 @@ export default function TaskManagement() {
           刷新
         </Button>
 
+        <Button
+          danger
+          icon={<DeleteOutlined />}
+          disabled={selectedKeys.length === 0}
+          onClick={handleBatchDelete}
+        >
+          删除{selectedKeys.length ? ` (${selectedKeys.length})` : ''}
+        </Button>
+
         {hasRunning && (
           <Text type="secondary" style={{ fontSize: 12 }}>
             有任务运行中，每 3 秒自动刷新进度
@@ -207,7 +287,21 @@ export default function TaskManagement() {
         dataSource={data}
         rowKey="id"
         loading={loading}
-        scroll={{ x: 1300 }}
+        scroll={{ x: 1360 }}
+        rowSelection={{
+          selectedRowKeys: selectedKeys,
+          onChange: setSelectedKeys,
+          // 运行中/待执行的不可选：后端会拒绝删除，让它可勾只会得到"跳过 N 个"
+          getCheckboxProps: record => ({
+            disabled: ['pending', 'running'].includes(record.status)
+          })
+        }}
+      />
+
+      <TaskLogDrawer
+        open={!!logTask}
+        task={logTask}
+        onClose={() => setLogTask(null)}
       />
 
       <Modal

@@ -5,7 +5,12 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import func
 
-from backend.executor import request_cancel, start_task
+from backend.executor import is_running as is_task_running, request_cancel, start_task
+from backend.tasklog import (
+    drop as drop_task_log,
+    has as has_task_log,
+    read as read_task_log,
+)
 from backend.mailfactory import MailConfigError, build_mail_client
 from backend.models import db, RegisterTask, MailConfig, User, OperationLog
 from src import config as site_config
@@ -56,6 +61,56 @@ def get_task(task_id):
     """获取任务详情"""
     task = RegisterTask.query.get_or_404(task_id)
     return jsonify(task.to_dict())
+
+
+@bp.route("/<int:task_id>/logs", methods=["GET"])
+@jwt_required()
+def get_task_logs(task_id):
+    """任务执行日志（增量轮询）。
+
+    协议：前端带上次拿到的最大 `after=<seq>`，这里只回 `seq > after` 的行。
+    全量重传会让轮询响应随任务变长而线性膨胀（跑 500 个账号时每 1.5 秒传几十 KB）。
+
+    两个数据源，优先内存：
+      · `live=true` —— 来自进程内缓冲，任务正在跑/刚跑完，支持增量。
+      · `live=false` —— 缓冲没了（进程重启过、或历史任务被淘汰），
+        回退到数据库里的整块快照 `snapshot`，只在 `after=0` 时给一次。
+    """
+    task = RegisterTask.query.get_or_404(task_id)
+    after = request.args.get("after", 0, type=int)
+
+    base = {
+        "task_id": task.id,
+        "status": task.status,
+        "progress": task.progress,
+        "count": task.count,
+        "success_count": task.success_count,
+        "failed_count": task.failed_count,
+        "error_message": task.error_message,
+        # 线程还在不在。与 status 分开给：status 已是终态但线程仍在收尾时
+        # 前端应该继续轮询（否则会漏掉最后几行）。
+        "running": is_task_running(task.id),
+    }
+
+    lines, latest = read_task_log(task.id, after)
+    if latest or has_task_log(task.id):
+        return jsonify({
+            **base,
+            "live": True,
+            "lines": lines,
+            "next": max(latest, after),
+            # 前端据此提示"更早的日志已被截断"（环形缓冲挤掉了开头）
+            "truncated": bool(lines and after and lines[0]["seq"] > after + 1),
+        })
+
+    return jsonify({
+        **base,
+        "live": False,
+        "lines": [],
+        "next": 0,
+        "truncated": False,
+        "snapshot": (task.log_text or "") if after == 0 else None,
+    })
 
 
 @bp.route("/create", methods=["POST"])
@@ -155,6 +210,98 @@ def create_task():
     start_task(current_app._get_current_object(), task.id)
     
     return jsonify(task.to_dict()), 201
+
+
+@bp.route("/<int:task_id>", methods=["DELETE"])
+@jwt_required()
+def delete_task(task_id):
+    """删除任务记录。
+
+    🔴 运行中/待执行的**一律拒绝**，不做"先取消再删"：取消只是打标记，
+    执行线程还要跑完当前账号（十几秒）才停。这期间记录被删掉的话，
+    线程回写进度时 `RegisterTask.query.get()` 拿到 None ⇒ 任务静默结束、
+    已注册的账号却没人回写统计。要删就先取消，等它真的停下来。
+
+    ⚠️ 只删任务记录本身。跑出来的账号在账号池里独立存在（不是外键关联），
+    删任务不会动它们 —— 否则"清理任务列表"会连带毁掉交付物。
+    """
+    if not check_admin():
+        return jsonify({"error": "权限不足"}), 403
+
+    task = RegisterTask.query.get_or_404(task_id)
+
+    if task.status in ("pending", "running") or is_task_running(task_id):
+        return jsonify({
+            "error": "运行中或待执行的任务不能删除，请先取消并等待其停止"
+        }), 400
+
+    name = task.name
+    db.session.delete(task)
+    db.session.commit()
+
+    # 内存里的日志缓冲一起清掉，否则同 id 被复用时会看到上一个任务的日志
+    drop_task_log(task_id)
+
+    log = OperationLog(
+        user_id=get_current_user_id(),
+        action="delete_task",
+        resource_type="task",
+        resource_id=task_id,
+        details=f"删除任务: {name}",
+        ip_address=request.remote_addr,
+    )
+    db.session.add(log)
+    db.session.commit()
+
+    return jsonify({"message": "删除成功"})
+
+
+@bp.route("/batch-delete", methods=["POST"])
+@jwt_required()
+def batch_delete_tasks():
+    """批量删除任务。跳过运行中/待执行的，返回实际删除数与跳过数。
+
+    ⚠️ 逐条 `session.delete()` 而不是 `query.delete()`：后者绕过 ORM，
+    没法顺手清理内存日志缓冲，也拿不到被跳过的条目。任务量级是几百，不值得为此优化。
+    """
+    if not check_admin():
+        return jsonify({"error": "权限不足"}), 403
+
+    data = request.get_json() or {}
+    ids = data.get("ids") or []
+
+    if not ids:
+        return jsonify({"error": "请选择要删除的任务"}), 400
+
+    tasks = RegisterTask.query.filter(RegisterTask.id.in_(ids)).all()
+
+    deleted, skipped = 0, 0
+    for t in tasks:
+        if t.status in ("pending", "running") or is_task_running(t.id):
+            skipped += 1
+            continue
+        tid = t.id
+        db.session.delete(t)
+        deleted += 1
+        drop_task_log(tid)
+
+    db.session.commit()
+
+    if deleted:
+        db.session.add(OperationLog(
+            user_id=get_current_user_id(),
+            action="batch_delete_task",
+            resource_type="task",
+            details=f"批量删除任务 {deleted} 个" + (f"，跳过运行中 {skipped} 个" if skipped else ""),
+            ip_address=request.remote_addr,
+        ))
+        db.session.commit()
+
+    msg = f"已删除 {deleted} 个任务"
+    if skipped:
+        msg += f"，{skipped} 个运行中/待执行的已跳过"
+
+    return jsonify({"message": msg, "deleted": deleted, "skipped": skipped})
 
 
 @bp.route("/<int:task_id>/cancel", methods=["POST"])

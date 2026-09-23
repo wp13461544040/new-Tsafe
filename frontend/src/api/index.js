@@ -19,6 +19,12 @@ export const getTasks = (params) => request.get('/task/list', { params })
 export const getTask = (id) => request.get(`/task/${id}`)
 export const createTask = (data) => request.post('/task/create', data)
 export const cancelTask = (id) => request.post(`/task/${id}/cancel`)
+// 实时日志：增量拉取（after = 上次拿到的最大 seq）。
+// silent：抽屉打开时 1.5 秒一次，失败弹 toast 会刷屏
+export const getTaskLogs = (id, after = 0) =>
+  request.get(`/task/${id}/logs`, { params: { after }, silent: true })
+export const deleteTask = (id) => request.delete(`/task/${id}`)
+export const batchDeleteTasks = (ids) => request.post('/task/batch-delete', { ids })
 
 // 卡密管理
 export const getCards = (params) => request.get('/card/list', { params })

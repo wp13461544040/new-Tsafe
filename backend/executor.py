@@ -13,6 +13,7 @@ import threading
 import traceback
 from backend.timeutil import now
 
+from backend import tasklog
 from backend.mailfactory import MailConfigError, build_mail_client
 from backend.models import MailConfig, OperationLog, RegisterTask, db
 from src import config as site_config
@@ -70,6 +71,20 @@ def _run_task(app, task_id: int):
     with _flags_lock:
         _cancel_flags[task_id] = cancel
 
+    # 实时日志：先清空缓冲（同一个 id 不该混进上一轮的行），
+    # `emit` 写执行器自己的生命周期事件，Pipeline 的过程日志由 log_sink 直接进缓冲。
+    tasklog.reset(task_id)
+    emit = lambda msg: tasklog.append(task_id, msg)  # noqa: E731
+
+    def persist_log(t: RegisterTask | None) -> None:
+        """把日志快照写进任务记录。
+
+        🔴 失败/取消/完成**每条路径都要调**：只在成功路径落库的话，
+        最需要看日志的那些任务（失败的）重启后反而什么都看不到。
+        """
+        if t is not None:
+            t.log_text = tasklog.dump(task_id)
+
     try:
         with app.app_context():
             task = RegisterTask.query.get(task_id)
@@ -82,6 +97,8 @@ def _run_task(app, task_id: int):
             from backend.api.system import load_site_config_from_db
             load_site_config_from_db()
 
+            emit(f"任务启动：{task.name}（目标 {task.count} 个，并发 {task.concurrency}）")
+
             missing_site = site_config.validate_site()
             if missing_site:
                 task.status = "failed"
@@ -90,6 +107,8 @@ def _run_task(app, task_id: int):
                     f"请到「系统设置 → 站点配置」补全"
                 )
                 task.completed_at = now()
+                emit(f"✗ {task.error_message}")
+                persist_log(task)
                 db.session.commit()
                 return
 
@@ -101,8 +120,12 @@ def _run_task(app, task_id: int):
                 task.status = "failed"
                 task.error_message = str(exc)
                 task.completed_at = now()
+                emit(f"✗ 邮箱配置不可用：{exc}")
+                persist_log(task)
                 db.session.commit()
                 return
+
+            emit(f"邮箱后端：{(mc.backend or '-')}（配置「{mc.name}」）")
 
             task.status = "running"
             task.started_at = now()
@@ -127,6 +150,9 @@ def _run_task(app, task_id: int):
                 backend=backend,
                 domain=None,  # 用客户端实例自带的（来自页面配置）
                 verbose=False,
+                # 过程日志接到内存缓冲，供任务详情的实时日志面板轮询。
+                # verbose 仍为 False —— 容器 stdout 不需要被每个账号的细节灌满。
+                log_sink=emit,
             )
 
             done = success = failed = 0
@@ -140,10 +166,13 @@ def _run_task(app, task_id: int):
                     task.status = "cancelled"
                     task.error_message = f"用户取消（已完成 {done}/{total}）"
                     task.completed_at = now()
+                    emit(f"■ 用户取消，已完成 {done}/{total}")
+                    persist_log(task)
                     db.session.commit()
                     return
 
                 batch = min(concurrency, total - done)
+                emit(f"── 批次开始：{done + 1}-{done + batch} / {total}")
                 try:
                     recs = pipeline.run_batch(
                         count=batch,
@@ -156,6 +185,8 @@ def _run_task(app, task_id: int):
                     task.status = "failed"
                     task.error_message = f"{type(exc).__name__}: {exc}"
                     task.completed_at = now()
+                    emit(f"✗ 批次异常，任务中止：{type(exc).__name__}: {exc}")
+                    persist_log(task)
                     db.session.commit()
                     app.logger.exception("任务 %s 批次异常", task_id)
                     return
@@ -163,6 +194,7 @@ def _run_task(app, task_id: int):
                 for rec in recs:
                     if getattr(rec, "status", "") == "keyed":
                         success += 1
+                        emit(f"  ✓ {getattr(rec, 'email', '') or '(无邮箱)'} 取到 key")
                     else:
                         failed += 1
                         # 留一条失败原因。`run_batch` 不抛异常、而是把失败写进
@@ -171,8 +203,12 @@ def _run_task(app, task_id: int):
                         err = getattr(rec, "error", "") or ""
                         if err:
                             last_error = err
+                        emit(f"  ✗ {getattr(rec, 'email', '') or '(无邮箱)'} "
+                             f"失败（{getattr(rec, 'status', '?')}）"
+                             f"{'：' + err[:200] if err else ''}")
 
                 done += batch
+                emit(f"── 批次结束：累计 {done}/{total}，成功 {success} / 失败 {failed}")
 
                 # 每批写一次进度。`task` 可能已过期（线程里跨了 commit），
                 # 重新查一次拿最新实例。
@@ -182,6 +218,9 @@ def _run_task(app, task_id: int):
                 task.progress = done
                 task.success_count = success
                 task.failed_count = failed
+                # 每批同步一次日志快照：跑几十个账号要好几分钟，
+                # 只在终态落库的话中途重启就什么都不剩了。
+                persist_log(task)
                 db.session.commit()
 
             # 🔴 终态按**实际结果**判，不能跑完就无条件 completed：
@@ -202,6 +241,8 @@ def _run_task(app, task_id: int):
                     )
 
             task.completed_at = now()
+            emit(f"■ 任务结束：{task.status}，成功 {success} / 失败 {failed}")
+            persist_log(task)
             db.session.commit()
 
             log = OperationLog(
@@ -222,6 +263,8 @@ def _run_task(app, task_id: int):
                     t.status = "failed"
                     t.error_message = f"执行器异常：{traceback.format_exc(limit=3)[:500]}"
                     t.completed_at = now()
+                    tasklog.append(task_id, f"✗ 执行器异常：{traceback.format_exc(limit=3)[:500]}")
+                    t.log_text = tasklog.dump(task_id)
                     db.session.commit()
         except Exception:  # noqa: BLE001
             pass

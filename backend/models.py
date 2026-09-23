@@ -142,7 +142,12 @@ class RegisterTask(db.Model):
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     
     error_message = db.Column(db.Text)
-    
+    #: 执行过程日志的持久化快照。实时日志走内存缓冲（backend/tasklog.py），
+    #: 这里存整块文本，让进程重启后和历史任务仍能回看。
+    #: ⚠️ **不放进 `to_dict()`** —— 列表接口一次返回 100 条任务，
+    #: 每条带几十 KB 日志会把响应撑到几 MB，页面明显变卡。只在日志接口里单独取。
+    log_text = db.Column(db.Text)
+
     mail_config = db.relationship("MailConfig", backref="tasks")
     creator = db.relationship("User", backref="tasks")
 

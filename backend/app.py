@@ -38,6 +38,10 @@ def run_migrations():
             "moemail_expiry_ms": "INTEGER DEFAULT 86400000",
             "moemail_poll_interval": "FLOAT DEFAULT 3.0",
         },
+        "register_tasks": {
+            # 任务执行日志快照。见 backend/tasklog.py
+            "log_text": "TEXT",
+        },
         "accounts": {
             # 巡检验活。见 backend/models.py 的 Account.apply_check()
             "last_checked_at": "DATETIME",
